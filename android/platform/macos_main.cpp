@@ -34,6 +34,7 @@
 #ifdef A5_HAVE_MAIN
 #include "game_entry.h"
 #include "a5_input.h"
+extern "C" void a5_audio_log_stats( void );   // [macos] platform/audio_android.cpp
 #include "d3d9.h"
 /*  Implemented in compat/src/win32compat.cpp; the engine's cursor reads it. */
 extern "C" void a5_set_pointer_position( long x, long y );
@@ -380,6 +381,16 @@ int main( int argc, char **argv )
 #ifdef A5_HAVE_MAIN
         if ( bShowGame && bGameRunning )
         {
+            /*  [macos] The mixer reports what it is actually doing -- voices,
+             *  streams, output rate, peak level.  Worth having in the log at a
+             *  low rate: "peak 0.00" is the difference between a device that
+             *  opened and a device that is making sound. */
+            static int nAudioStatsTick = 0;
+            if ( ++nAudioStatsTick >= 600 )
+            {
+                nAudioStatsTick = 0;
+                a5_audio_log_stats();
+            }
             /*  The engine renders through the D3D shim and calls HookPresent()
              *  itself, so this branch must not swap or clear. */
             if ( !a5_game_step( 1 ) )

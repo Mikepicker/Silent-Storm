@@ -69,6 +69,9 @@
 using namespace NAudioDecode;
 
 /* ========================================================================== */
+#ifdef A5_SDL_AUDIO
+#include <SDL.h>
+#endif
 /*  AAudio, loaded at run time                                                 */
 /* ========================================================================== */
 namespace {
@@ -253,6 +256,12 @@ volatile bool g_bActive = true;        /* foreground */
 bool      g_bInitialised = false;
 SAAudio   g_aa;
 AAudioStream *g_pStream = 0;
+#ifdef A5_SDL_AUDIO
+/*  [macos] The mixer above is platform-independent; only the output stage was
+ *  AAudio.  SDL2 is already linked for the desktop build, and its queue API is
+ *  the same push model as AAudioStream_write, so it drops straight in. */
+SDL_AudioDeviceID g_sdlDev = 0;
+#endif
 int       g_nOutChannels = 2;
 int       g_nUnderruns = 0;
 int       g_nReopens = 0;
@@ -516,6 +525,43 @@ void MixBlock( float *pOut, int nFrames, int nOutRate )
 }
 
 /* ---- output ------------------------------------------------------------- */
+#ifdef A5_SDL_AUDIO
+bool OpenOutput()
+{
+    if ( g_sdlDev )
+        return true;
+    if ( SDL_InitSubSystem( SDL_INIT_AUDIO ) != 0 )
+    {
+        a5_log( A5_PRIORITY_ERROR, "audio: SDL_InitSubSystem(AUDIO): %s", SDL_GetError() );
+        return false;
+    }
+    SDL_AudioSpec want, have;
+    memset( &want, 0, sizeof( want ) );
+    want.freq     = 44100;
+    want.format   = AUDIO_S16SYS;
+    want.channels = 2;
+    want.samples  = N_BLOCK_FRAMES;   /* queue feeds it; no callback */
+    g_sdlDev = SDL_OpenAudioDevice( 0, 0, &want, &have, 0 );
+    if ( !g_sdlDev )
+    {
+        a5_log( A5_PRIORITY_ERROR, "audio: SDL_OpenAudioDevice: %s", SDL_GetError() );
+        return false;
+    }
+    g_nOutRate = have.freq;
+    SDL_PauseAudioDevice( g_sdlDev, 0 );
+    a5_log( A5_PRIORITY_INFO, "audio: SDL output %d Hz, %d ch, %d-frame buffer",
+            have.freq, have.channels, have.samples );
+    return true;
+}
+void CloseOutput()
+{
+    if ( g_sdlDev )
+    {
+        SDL_CloseAudioDevice( g_sdlDev );
+        g_sdlDev = 0;
+    }
+}
+#else
 bool OpenOutput()
 {
     if ( !g_aa.Load() )
@@ -589,6 +635,7 @@ void CloseOutput()
         g_pStream = 0;
     }
 }
+#endif   /* A5_SDL_AUDIO */
 
 void SleepMs( int nMs )
 {
@@ -617,7 +664,12 @@ void *MixerThread( void * )
             continue;
         }
         bWasActive = true;
-        if ( !g_pStream )
+#ifdef A5_SDL_AUDIO
+        const bool bHaveDevice = ( g_sdlDev != 0 );
+#else
+        const bool bHaveDevice = ( g_pStream != 0 );
+#endif
+        if ( !bHaveDevice )
         {
             if ( nRetryMs > 0 )
             {
@@ -630,7 +682,11 @@ void *MixerThread( void * )
             }
             if ( !OpenOutput() )
             {
+#ifdef A5_SDL_AUDIO
+                nRetryMs = 2000;
+#else
                 nRetryMs = g_aa.hLib ? 2000 : 1000000;   /* no AAudio at all: don't keep trying */
+#endif
                 continue;
             }
         }
@@ -647,6 +703,23 @@ void *MixerThread( void * )
         }
         g_fPeak = fPeak;
         ++g_nBlocksMixed;
+#ifdef A5_SDL_AUDIO
+        /*  [macos] SDL_QueueAudio never blocks, so the mixer would spin ahead of
+         *  real time and build an unbounded queue.  Hold roughly four blocks in
+         *  flight and sleep otherwise -- that is the back-pressure AAudio's
+         *  blocking write gave us for free. */
+        const Uint32 nBytes = (Uint32)( N_BLOCK_FRAMES * 2 * sizeof( int16_t ) );
+        if ( SDL_QueueAudio( g_sdlDev, &out[ 0 ], nBytes ) != 0 )
+        {
+            a5_log( A5_PRIORITY_WARN, "audio: SDL_QueueAudio: %s -- reopening", SDL_GetError() );
+            CloseOutput();
+            ++g_nReopens;
+            nRetryMs = 200;
+        }
+        while ( g_bRun && g_bActive && g_sdlDev &&
+                SDL_GetQueuedAudioSize( g_sdlDev ) > nBytes * 4 )
+            SleepMs( 2 );
+#else
         int nWritten = 0;
         while ( nWritten < N_BLOCK_FRAMES && g_bRun && g_bActive )
         {
@@ -663,6 +736,7 @@ void *MixerThread( void * )
         }
         if ( g_pStream && g_aa.streamGetXRunCount )
             g_nUnderruns = g_aa.streamGetXRunCount( g_pStream );
+#endif
     }
     CloseOutput();
     return 0;
@@ -1228,6 +1302,10 @@ extern "C" void a5_audio_log_stats( void )
     const float fPeak = g_fPeak;
     g_fPeak = 0;
     a5_log( A5_PRIORITY_INFO, "audio: %s, %d voices (%d 3D), %d streams, out %d Hz, peak %.2f, %ld blocks, underruns %d, reopens %d, sfx %.2f music %d",
+#ifdef A5_SDL_AUDIO
+            g_bInitialised ? ( g_sdlDev ? "playing" : "no output" ) : "not initialised",   // [macos]
+#else
             g_bInitialised ? ( g_pStream ? "playing" : "no output" ) : "not initialised",
+#endif
             nVoices, n3D, nStreams, g_nOutRate, fPeak, g_nBlocksMixed, g_nUnderruns, g_nReopens, g_fSfxMaster, g_nMusicVolume );
 }

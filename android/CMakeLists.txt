@@ -387,14 +387,25 @@ if(NOT ANDROID)
                 a5_engine_module(a5mainshaders ${ENGINE_GEN}/Main/GfxShaders.cpp)
                 target_include_directories(a5mainshaders PUBLIC
                     ${COMPAT_DIR}/d3d9gles ${COMPAT_DIR}/macos)
-                #  audio_null.cpp implements the engine's NFMSound interface
-                #  without FMOD; input_android.cpp implements NInput and is
-                #  portable apart from <android/keycodes.h>, which compat/macos
-                #  supplies.  macos_main feeds it the same key codes from SDL.
+                #  Audio: audio_android.cpp is the engine's NFMSound on a
+                #  software mixer.  Only its OUTPUT stage was Android-specific
+                #  (AAudio via dlopen); A5_SDL_AUDIO swaps that for SDL2, which
+                #  this target already links, and the ~1000-line mixer and the
+                #  Ogg/WAV decoders come along unchanged.  -DA5_AUDIO_NULL=ON
+                #  puts the silent back end back for bring-up.
+                #  input_android.cpp implements NInput and is portable apart
+                #  from <android/keycodes.h>, which compat/macos supplies.
                 target_sources(silentstorm_mac PRIVATE
                     ${PLATFORM_DIR}/game_entry.cpp
-                    ${PLATFORM_DIR}/audio_null.cpp
                     ${PLATFORM_DIR}/input_android.cpp)
+                if(A5_AUDIO_NULL)
+                    target_sources(silentstorm_mac PRIVATE ${PLATFORM_DIR}/audio_null.cpp)
+                else()
+                    target_sources(silentstorm_mac PRIVATE ${PLATFORM_DIR}/audio_android.cpp)
+                    target_link_libraries(silentstorm_mac a5audiodecode)
+                    target_compile_definitions(silentstorm_mac PRIVATE
+                        A5_HAVE_AUDIO=1 A5_SDL_AUDIO=1)
+                endif()
                 target_include_directories(silentstorm_mac PRIVATE ${COMPAT_DIR}/d3d9gles)
                 target_compile_definitions(silentstorm_mac PRIVATE A5_HAVE_MAIN=1)
                 target_link_libraries(silentstorm_mac a5main a5mainshaders a5d3d9gles)
