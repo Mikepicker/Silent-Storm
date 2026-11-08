@@ -5395,6 +5395,31 @@ RULES += [
 
 
 # ---------------------------------------------------------------------------
+#  macOS: one Cyrillic letter made every weapon in the game do zero damage
+# ---------------------------------------------------------------------------
+RULES += [
+    (
+        "DBFormat/DataRPG.cpp",
+        'CRPGWeapon::Import asked for a column name holding a CYRILLIC SMALL LETTER O (U+043E) where game.db has a Latin o.  This port reads retail game.db by column NAME, so the lookup never matched: every weapon\'s nDamageMod stayed 0, nDmgMin = ammo damage * 0 / 100 = 0, and every shot in the game did exactly zero damage -- nothing could ever die.  With the letter corrected the MP40 goes from 0..0 to 24..29.  game.db had been reporting it all along at warn priority: "column ... is not in the table (105 rows)".',
+        'NDatabase::ImportField( "DamageMоd", &nDamageMod );',
+        '// [macos] was "DamageM\\u043Ed" with a CYRILLIC SMALL LETTER O; see the rule\n\tNDatabase::ImportField( "DamageMod", &nDamageMod );',
+    ),
+    (
+        "Main/RPGAttackMech.cpp",
+        'Show the inputs to the structural damage calculation -- this is what localised the zero-damage bug: dmgMin=0 dmgMax=0 while piercing, velocity and weight all read correctly, which ruled out the armour and the coefficient and pointed at the weapon record.',
+        '\tint nResDmg = nDmg + Min( nAPA - pArmor->pMaterial->nThreshold, 0 );\n\tnResDmg = Max( nResDmg, 0 );\n\treturn nResDmg * fDamageCoeff;',
+        '\tint nResDmg = nDmg + Min( nAPA - pArmor->pMaterial->nThreshold, 0 );\n\tnResDmg = Max( nResDmg, 0 );\n\tcsRPG << "DMG: nK=" << nK << " nAPA=" << nAPA   // [macos]\n\t      << " dmgMin=" << nDmgMin << " dmgMax=" << nDmgMax << " nDmg=" << nDmg\n\t      << " threshold=" << pArmor->pMaterial->nThreshold\n\t      << " nResDmg=" << nResDmg << " coeff=" << fDamageCoeff\n\t      << " -> " << (int)( nResDmg * fDamageCoeff ) << endl;\n\treturn nResDmg * fDamageCoeff;',
+    ),
+    (
+        "Main/RPGAttackMech.cpp",
+        'LogStream for the diagnostic above.',
+        '#include "../DBFormat/DataRPG.h"',
+        '#include "../DBFormat/DataRPG.h"\n#include "../MiscDll/LogStream.h"   // [macos] damage diagnostic',
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
 def vcproj_source_list(vcproj_path):
