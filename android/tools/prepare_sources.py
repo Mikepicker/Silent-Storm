@@ -5488,6 +5488,16 @@ RULES += [
 ]
 
 
+RULES += [
+    (
+        "Main/iFaceGen.cpp",
+        'Report what the face selector actually receives.  The screen was reported as not changing the face when the slider moves, and this separates the three things that look identical from outside: no notify at all (the click never reached the control), a notify whose value did not change (the bar has only one step per head, so a small drag moves nothing), and a value at or past customHeads.size(), which the handler silently ignores.',
+        '\tcase EVENT_NOTIFY:\n\t\t{\n\t\t\tif ( sEvent.szID == "face" )',
+        '\tcase EVENT_NOTIFY:\n\t\t{\n\t\t\tcsSystem << "FACE-EVT: id=\'" << sEvent.szID << "\' value="   // [macos]\n\t\t\t         << ( IsValid( pFaceScroll ) ? pFaceScroll->GetValue() : -1 )\n\t\t\t         << " heads=" << (int)customHeads.size() << endl;\n\t\t\tif ( sEvent.szID == "face" )',
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
