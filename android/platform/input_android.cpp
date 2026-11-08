@@ -124,6 +124,11 @@ std::deque< SMessage > g_pending;     /* filled by a5_input_*, drained by PumpMe
 std::deque< SMessage > g_messages;    /* handed out by GetMessage; game thread only */
 bool g_bInitialised = false;
 int  g_nMouseButton0, g_nMouseButton1, g_nMouseButton2, g_nAxisX, g_nAxisY, g_nAxisZ;
+/*  [macos] Shift / Caps Lock state for GetCharForKey.  The engine asks this
+ *  layer for a character per key, and it only ever handed back the upper-case
+ *  virtual key, so every name typed in the game came out in capitals. */
+volatile bool g_bShiftDown = false;
+volatile bool g_bCapsLock  = false;
 
 void Push( int nControl, bool bState, int nParam )
 {
@@ -136,6 +141,13 @@ void Push( int nControl, bool bState, int nParam )
     m.nParam = nParam;
     m.bState = bState;
     m.tTime = GetTickCount();
+    {   /* [macos] remember the modifiers the character conversion needs */
+        const char *pszName = CONTROLS[ nControl ].pszName;
+        if ( strcmp( pszName, "LSHIFT" ) == 0 || strcmp( pszName, "RSHIFT" ) == 0 )
+            g_bShiftDown = bState;
+        else if ( strcmp( pszName, "CAPITAL" ) == 0 && bState )
+            g_bCapsLock = !g_bCapsLock;
+    }
     std::lock_guard< std::mutex > lock( g_queueMutex );
     g_pending.push_back( m );
 }
@@ -193,7 +205,30 @@ bool GetCharForKey( int nVirtualKey, WCHAR *pwcChar )
 {
     /* Text entry (save-game names).  Virtual keys here are the Win32 VK codes
      * the compat layer defines; letters and digits map to themselves. */
-    if ( ( nVirtualKey >= '0' && nVirtualKey <= '9' ) || ( nVirtualKey >= 'A' && nVirtualKey <= 'Z' ) || nVirtualKey == ' ' )
+    if ( nVirtualKey >= 'A' && nVirtualKey <= 'Z' )
+    {
+        /*  [macos] The virtual key for a letter IS its upper-case ASCII, and
+         *  this used to be returned verbatim -- so names could only be typed
+         *  in capitals.  Fold to lower case unless Shift or Caps Lock says
+         *  otherwise (exactly one of them: shift+caps is lower case). */
+        const bool bUpper = ( g_bShiftDown != g_bCapsLock );
+        *pwcChar = (WCHAR)( bUpper ? nVirtualKey : nVirtualKey - 'A' + 'a' );
+        return true;
+    }
+    if ( ( nVirtualKey >= '0' && nVirtualKey <= '9' ) || nVirtualKey == ' ' )
+    {
+        *pwcChar = (WCHAR)nVirtualKey;
+        return true;
+    }
+    /*  [macos] Offer the punctuation a name might want.  Whether it arrives is
+     *  the edit control's call, not ours: CEdit in FILENAME mode drops
+     *  anything below ASCII 40 (so an apostrophe, 39, never lands) and the
+     *  characters in ".<>\/|\"*^:?".  Deliberately NOT gated on Shift -- the
+     *  shifted symbols would need a keyboard-layout table this port does not
+     *  have, and gating meant a modifier whose release went missing silently
+     *  swallowed the key.  Verified here: letters and case.  Not verified:
+     *  these, which I could not get a synthetic key press to deliver. */
+    if ( nVirtualKey == '-' || nVirtualKey == '\'' || nVirtualKey == '.' || nVirtualKey == ',' )
     {
         *pwcChar = (WCHAR)nVirtualKey;
         return true;
