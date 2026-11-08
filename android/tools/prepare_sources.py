@@ -5472,6 +5472,22 @@ RULES += [
 ]
 
 
+RULES += [
+    (
+        "Main/iOptionsMenu.cpp",
+        "CComplexSlider swallowed its inner slider's notify -- it handled the event, called UpdateControls() and returned true without telling the page that owns it.  Moving the music slider updated the number on screen and nothing else.  Forward a notify under the slider's own window id.",
+        '\t\t\t\tpSlider->SetValue( pSlider->GetValue() - N_SLIDER_STEPS / 10 );\n\n\t\t\tUpdateControls();\n\t\t\treturn true;\n\t\t}',
+        '\t\t\t\tpSlider->SetValue( pSlider->GetValue() - N_SLIDER_STEPS / 10 );\n\n\t\t\tUpdateControls();\n\t\t\t// [macos] see the rule description\n\t\t\tSendMessage( GetParent(), SEvent( EVENT_NOTIFY, GetWindowID() ) );\n\t\t\treturn true;\n\t\t}',
+    ),
+    (
+        "Main/iOptionsMenu.cpp",
+        'The audio options only committed the volumes on "apply", and the retail options container has no apply button: the log says "control apply in container options not found" and the screen shows only SET DEFAULTS.  Commit on the sliders\' own notifies instead, which is what the retail screen does, and right after SET DEFAULTS too.',
+        '\t\t\tif ( sEvent.szID == "apply" )\n\t\t\t{\n\t\t\t\tNGlobal::SetVar( "sound_sfxvolume", pSoundVolume->GetValue() );\n\t\t\t\tNGlobal::SetVar( "sound_musicvolume", pMusicVolume->GetValue() );\n\t\t\t}\n\t\t\telse if ( sEvent.szID == "default" )\n\t\t\t{\n\t\t\t\tpSoundVolume->SetValue( 1.0f );\n\t\t\t\tpMusicVolume->SetValue( 0.5f );\n\t\t\t}',
+        '\t\t\t// [macos] see the rule description\n\t\t\tif ( sEvent.szID == "default" )\n\t\t\t{\n\t\t\t\tif ( IsValid( pSoundVolume ) ) pSoundVolume->SetValue( 1.0f );\n\t\t\t\tif ( IsValid( pMusicVolume ) ) pMusicVolume->SetValue( 0.5f );\n\t\t\t}\n\t\t\tif ( sEvent.szID == "apply" || sEvent.szID == "default" ||\n\t\t\t     sEvent.szID == "sound_volume" || sEvent.szID == "music_volume" )\n\t\t\t{\n\t\t\t\tif ( IsValid( pSoundVolume ) )\n\t\t\t\t\tNGlobal::SetVar( "sound_sfxvolume", pSoundVolume->GetValue() );\n\t\t\t\tif ( IsValid( pMusicVolume ) )\n\t\t\t\t\tNGlobal::SetVar( "sound_musicvolume", pMusicVolume->GetValue() );\n\t\t\t}',
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
