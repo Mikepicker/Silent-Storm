@@ -248,7 +248,7 @@ int main( int argc, char **argv )
              *  distracting double pointer.  Re-shown when TAB returns to the
              *  boot console, and on exit. */
             SDL_ShowCursor( SDL_DISABLE );
-            printf( "\ngame: init OK -- running.  TAB switches to the boot report.\n" );
+            printf( "\ngame: init OK -- running.  F12 switches to the boot report.\n" );
         }
     }
     else
@@ -279,7 +279,11 @@ int main( int argc, char **argv )
                     const bool bDown = ( ev.type == SDL_KEYDOWN );
                     if ( bDown && ev.key.keysym.sym == SDLK_ESCAPE && !bShowGame )
                         bRunning = false;
-                    else if ( bDown && ev.key.keysym.sym == SDLK_TAB && bGameRunning )
+                    /*  [macos] The boot report used to toggle on TAB, which the
+                     *  game binds to hero_next -- so cycling squad members
+                     *  popped up the debug overlay instead.  F12 is free: the
+                     *  retail input.cfg binds F1..F10 and F11 is fullscreen. */
+                    else if ( bDown && ev.key.keysym.sym == SDLK_F12 && bGameRunning )
                     {
                         bShowGame = !bShowGame;
                         SDL_ShowCursor( bShowGame ? SDL_DISABLE : SDL_ENABLE );
