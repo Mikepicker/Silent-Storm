@@ -5420,6 +5420,43 @@ RULES += [
 
 
 # ---------------------------------------------------------------------------
+#  macOS: the in-mission Menu and Journal buttons
+# ---------------------------------------------------------------------------
+RULES += [
+    (
+        "Main/iTopPanel.cpp",
+        'The in-mission Menu and Journal buttons were dead. CTopBar bound only minimap, endmission, text, flash and playerturn -- it never looked at the gamemenu / clues buttons the retail topbar also carries, so clicking them did nothing. The keyboard route was dead too: this source declares CBind("mainmenu") while retail input.cfg binds "gamemenu" to F10 and comments "mainmenu" out. Without either, there was no way to reach Save/Load from inside a mission.',
+        '#include "iCommonUI.h"\n#include "iTopPanel.h"',
+        '#include "iCommonUI.h"\n#include "iInGameMenu.h"   // [macos] topbar Menu button\n#include "iCluesMenu.h"    // [macos] topbar Journal button\n#include "iTopPanel.h"',
+    ),
+    (
+        "Main/iTopPanel.cpp",
+        'Route the topbar notifies to the commands that already exist.',
+        '\tcase EVENT_MOUSEMOVE:\n\t\t{\n\t\t\tGetInterface()->SetCursorInfo( SCursorInfo() );\n\t\t\tbreak;\n\t\t}',
+        '\tcase EVENT_MOUSEMOVE:\n\t\t{\n\t\t\tGetInterface()->SetCursorInfo( SCursorInfo() );\n\t\t\tbreak;\n\t\t}\n\tcase EVENT_NOTIFY:\n\t\t{\n\t\t\t// [macos] see the rule description\n\t\t\tif ( sEvent.szID == "gamemenu" )\n\t\t\t{\n\t\t\t\tif ( IsValid( pMission ) && pMission->GetActivePlayer() )\n\t\t\t\t\tNMainLoop::Command( new NGame::CICInGameMenu(\n\t\t\t\t\t\tpMission->GetActivePlayer()->GetGlobalPlayer() ) );\n\t\t\t\treturn true;\n\t\t\t}\n\t\t\telse if ( sEvent.szID == "clues" )\n\t\t\t{\n\t\t\t\tif ( IsValid( pMission ) )\n\t\t\t\t\tNMainLoop::Command( new NGame::CICClues( pMission->GetRPGGame() ) );\n\t\t\t\treturn true;\n\t\t\t}\n\t\t\tbreak;\n\t\t}',
+    ),
+    (
+        "Main/iMissionInternal.h",
+        'Declare the second bind.',
+        'NInput::CBind bindCancel, bindCancelAction, bindContinue, bindPause, bindMainMenu, bindCluesMenu, bindEndMission;',
+        'NInput::CBind bindCancel, bindCancelAction, bindContinue, bindPause, bindMainMenu, bindGameMenu, bindCluesMenu, bindEndMission;   // [macos] bindGameMenu',
+    ),
+    (
+        "Main/iMission.cpp",
+        "Construct the second bind under retail's command name.",
+        'bindMainMenu( "mainmenu" ), bindEndMission( "endmission" )',
+        'bindMainMenu( "mainmenu" ), bindGameMenu( "gamemenu" ), bindEndMission( "endmission" )',
+    ),
+    (
+        "Main/iMission.cpp",
+        'Accept either command name, so F10 works with the shipped config.',
+        '\tif ( bindMainMenu.ProcessEvent( sEvent ) )\n\t{',
+        '\t// [macos] retail input.cfg binds "gamemenu" to F10 in the game section\n\t// and comments out "mainmenu"; this source only declared "mainmenu".\n\tif ( bindMainMenu.ProcessEvent( sEvent ) || bindGameMenu.ProcessEvent( sEvent ) )\n\t{',
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
 def vcproj_source_list(vcproj_path):
