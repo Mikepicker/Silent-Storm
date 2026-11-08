@@ -5035,6 +5035,38 @@ void CSideMenuUI::Draw( const STime &sTime, NGScene::I2DGameView *pView )   // [
     ),
     (
         "Main/iSideMenu.cpp",
+        "The side-select 3D scene renders at ~0.70x the scale the UI container "
+        "assumes, so the fixed axis/allies rects do not land on the dossiers "
+        "the player sees.  Measured: box centres allies (612.5,287) / axis "
+        "(436.5,447.5) against rendered folder centres (598.3,311.7) / "
+        "(476.2,425.1).  The offsets point opposite ways, so it is a scale, not "
+        "a shift -- separations (176,-160.5) vs (122,-113.4) = 0.70x about "
+        "(537,368), which reproduces both folders to within a pixel.  Map each "
+        "rect through it: fixes the caption AND the click target, same rect.",
+        """// [macos] Centre a button's caption in its box; see the rule description.""",
+        """// [macos] The side-select 3D scene renders at ~0.70x the scale the UI
+// container assumes; see the rule description for the measurements.
+static SWindowInfo FitRectToScene( const SWindowInfo &sInfo )
+{
+\tconst float fScale = 0.70f;
+\tconst float fBoxCx = 524.0f, fBoxCy = 367.0f;       // midpoint of the two retail rects
+\tconst float fSceneCx = 537.0f, fSceneCy = 368.0f;   // midpoint of the two rendered folders
+
+\tconst float fCx = sInfo.sPosition.x + sInfo.sSize.x * 0.5f;
+\tconst float fCy = sInfo.sPosition.y + sInfo.sSize.y * 0.5f;
+\tconst float fNewCx = fSceneCx + fScale * ( fCx - fBoxCx );
+\tconst float fNewCy = fSceneCy + fScale * ( fCy - fBoxCy );
+\tconst SPoint sNewSize( (int)( sInfo.sSize.x * fScale ), (int)( sInfo.sSize.y * fScale ) );
+
+\treturn SWindowInfo( sInfo.pParent,
+\t\tSPoint( (int)( fNewCx - sNewSize.x * 0.5f ), (int)( fNewCy - sNewSize.y * 0.5f ) ),
+\t\tsNewSize, sInfo.szID, sInfo.nStyle );
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// [macos] Centre a button's caption in its box; see the rule description.""",
+    ),
+    (
+        "Main/iSideMenu.cpp",
         "Use the centring helper for the two dossier labels.",
         """					pAxis = new CScriptHoverButton( sEvent.pLoader->GetControl( "axis" ), pInterface );
 					pAxis->AddTextState( CHoverButton::STATE_HOVER, GetDBString( 11130 ) + u"<center>" + GetDBString( 11131 ) );
@@ -5048,6 +5080,18 @@ void CSideMenuUI::Draw( const STime &sTime, NGScene::I2DGameView *pView )   // [
 					pAllies = new CScriptHoverButton( sEvent.pLoader->GetControl( "allies" ), pInterface );
 					AddCenteredTextState( pAllies, CHoverButton::STATE_HOVER, GetDBString( 11130 ) + u"<center>" + GetDBString( 11132 ) );
 					AddCenteredTextState( pAllies, CHoverButton::STATE_NORMAL, GetDBString( 11129 ) + u"<center>" + GetDBString( 11132 ) );""",
+    ),
+    (
+        "Main/iSideMenu.cpp",
+        "Map the axis rect onto the rendered dossier.",
+        """sEvent.pLoader->GetControl( "axis" ), pInterface );""",
+        """FitRectToScene( sEvent.pLoader->GetControl( "axis" ) ), pInterface );""",
+    ),
+    (
+        "Main/iSideMenu.cpp",
+        "Map the allies rect onto the rendered dossier.",
+        """sEvent.pLoader->GetControl( "allies" ), pInterface );""",
+        """FitRectToScene( sEvent.pLoader->GetControl( "allies" ) ), pInterface );""",
     ),
     (
         "Main/iSaveLoad.cpp",
