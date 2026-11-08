@@ -5125,6 +5125,34 @@ void CSideMenuUI::Draw( const STime &sTime, NGScene::I2DGameView *pView )   // [
 ]
 
 
+RULES += [
+    (
+        "Main/iGlobalMap.cpp",
+        "Report what scenario a campaign start actually loaded.  Worth keeping: "
+        "an empty Objectives screen looks identical whether the scenario failed "
+        "to load or the UI container is missing controls, and this separates "
+        "the two in one line.",
+        """	pGame->bGlobalMapSet = true;
+	pGame->nGlobalMapID = nTemplateID;
+""",
+        """	pGame->bGlobalMapSet = true;
+	pGame->nGlobalMapID = nTemplateID;
+
+	// [macos] diagnostic: did a scenario actually load for this campaign?
+	{
+		list< CPtr<NScenario::CScenarioClue> > clues;
+		pGame->pScenarioTracker->GetAvailableClues( &clues );
+		list< CPtr<NScenario::CScenarioZone> > zones;
+		pGame->pScenarioTracker->GetAvailableZones( &zones );
+		csSystem << "SCENARIO: globalmap=" << nTemplateID << " scenarioID=" << nScenarioID
+		         << " available=" << (int)pGame->pScenarioTracker->IsScenarioAvailable()
+		         << " clues=" << (int)clues.size() << " zones=" << (int)zones.size() << endl;
+	}
+""",
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
