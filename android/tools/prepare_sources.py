@@ -5154,6 +5154,98 @@ RULES += [
 
 
 # ---------------------------------------------------------------------------
+#  macOS: mission-UI container skew
+#
+#  The retail mission UI is further ahead of this source than the menus are.
+#  One mission reported 32 distinct missing controls across 15 containers.
+#  Both lookup paths (CLoader::GetControl and GetUIWindow) already build a
+#  silent zero-sized stand-in, so nothing crashes -- the panels just come up
+#  blank, which is far harder to notice than a crash.
+# ---------------------------------------------------------------------------
+RULES += [
+    (
+        "Main/UIInterface.h",
+        "Declare the two helpers the fixes below need: a container dump for "
+        "diagnosing skew, and a stand-in laid out against the parent's own rect.",
+        """	SWindowInfo MakeLineControl( const string &szID, int nLine, int nIndex, int nCount );
+};""",
+        """	SWindowInfo MakeLineControl( const string &szID, int nLine, int nIndex, int nCount );
+	// [macos] print every control a container actually carries
+	void DumpControls( const char *pszWhere ) const;
+	// [macos] a stand-in laid out against the PARENT's own rect, as fractions
+	// of its width/height.  MakeLineControl is no use inside a small nested
+	// panel: its fallback is absolute screen coordinates.
+	SWindowInfo MakeInsetControl( const string &szID, float fX0, float fY0, float fX1, float fY1 );
+};""",
+    ),
+    (
+        "Main/UIInterface.cpp",
+        "Definitions of DumpControls and MakeInsetControl.",
+        """////////////////////////////////////////////////////////////////////////////////////////////////////
+bool CLoader::HasControl( const string &szID ) const   // [android]""",
+        """////////////////////////////////////////////////////////////////////////////////////////////////////
+void CLoader::DumpControls( const char *pszWhere ) const   // [macos]
+{
+	csSystem << "UI-DUMP [" << pszWhere << "] parent=" << ( IsValid( pParent ) ? pParent->GetWindowID() : string( "<none>" ) )
+	         << " controls=" << (int)windowsSet.size() << endl;
+	for ( int nTemp = 0; nTemp < windowsSet.size(); nTemp++ )
+	{
+		const SWindowInfo &sInfo = windowsSet[nTemp].second.sInfo;
+		csSystem << "UI-DUMP [" << pszWhere << "]   id='" << sInfo.szID
+		         << "' pos=" << sInfo.sPosition.x << "," << sInfo.sPosition.y
+		         << " size=" << sInfo.sSize.x << "x" << sInfo.sSize.y
+		         << " style=0x" << sInfo.nStyle << endl;
+	}
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////
+SWindowInfo CLoader::MakeInsetControl( const string &szID, float fX0, float fY0, float fX1, float fY1 )   // [macos]
+{
+	const SPoint sSize = IsValid( pParent ) ? pParent->GetSize() : SPoint( 0, 0 );
+	const int nX = (int)( sSize.x * fX0 );
+	const int nY = (int)( sSize.y * fY0 );
+	const int nW = Max( 0, (int)( sSize.x * fX1 ) - nX );
+	const int nH = Max( 0, (int)( sSize.y * fY1 ) - nY );
+	return SWindowInfo( pParent, SPoint( nX, nY ), SPoint( nW, nH ), szID, STYLE_VISIBLE | STYLE_ENABLED );
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////
+bool CLoader::HasControl( const string &szID ) const   // [android]""",
+    ),
+    (
+        "Main/UIInterface.cpp",
+        "On the first miss in a container, print what it DOES carry.  Guessing "
+        "geometry is how this goes wrong; the dump gives the real rects to lay "
+        "a stand-in out against.",
+        """\tcsSystem << "UI-ERROR: UI Container not complete, control " << szID << " in container " << pParent->GetWindowID() << " not found" << endl;""",
+        """\tcsSystem << "UI-ERROR: UI Container not complete, control " << szID << " in container " << pParent->GetWindowID() << " not found" << endl;
+\t{   // [macos]
+\t\tstatic vector< string > dumped;
+\t\tconst string szContainer = IsValid( pParent ) ? pParent->GetWindowID() : string( "<none>" );
+\t\tif ( find( dumped.begin(), dumped.end(), szContainer ) == dumped.end() )
+\t\t{
+\t\t\tdumped.push_back( szContainer );
+\t\t\tDumpControls( szContainer.c_str() );
+\t\t}
+\t}""",
+    ),
+    (
+        "Main/iUnitPanel.cpp",
+        "The retail hero slots in infopanel_multipleunits are bare placeholders: "
+        "their nested template is absent, so the container loads with zero "
+        "controls and both health bars were invisible stand-ins.  Lay them along "
+        "the bottom of the tab instead.  (Two identical call sites.)",
+        """\t\t\tpLife = new CLineBar( sEvent.pLoader->GetControl( "life" ) );
+\t\t\tpHealedLife = new CLineBar( sEvent.pLoader->GetControl( "life_healed" ) );""",
+        """\t\t\tpLife = new CLineBar( sEvent.pLoader->HasControl( "life" )   // [macos]
+\t\t\t\t? sEvent.pLoader->GetControl( "life" )
+\t\t\t\t: sEvent.pLoader->MakeInsetControl( "life", 0.06f, 0.82f, 0.94f, 0.92f ) );
+\t\t\tpHealedLife = new CLineBar( sEvent.pLoader->HasControl( "life_healed" )
+\t\t\t\t? sEvent.pLoader->GetControl( "life_healed" )
+\t\t\t\t: sEvent.pLoader->MakeInsetControl( "life_healed", 0.06f, 0.82f, 0.94f, 0.92f ) );""",
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
 def vcproj_source_list(vcproj_path):
