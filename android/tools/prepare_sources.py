@@ -5289,6 +5289,81 @@ bool CLoader::HasControl( const string &szID ) const   // [android]""",
 ]
 
 
+RULES += [
+    (
+        "Main/UIWindow.h",
+        "GetUIWindow reported every failure as 'not found', which hid the "
+        "difference between an absent control and one that is present but not "
+        "the type the caller casts to -- a type mismatch is a one-line fix, an "
+        "absent control needs a stand-in.  Say which, and list what the "
+        "container does hold on the first miss (the loader path has "
+        "CLoader::DumpControls; this is the same thing for live children).",
+        """template<class TYPE>
+TYPE* GetUIWindow( CWindow *pContainer, const string &szID )
+{""",
+        """// [macos] On the first miss in a container, list what it DOES hold.
+inline void a5_dump_children( CWindow *pContainer )
+{
+\tstatic vector< string > dumped;
+\tconst string szWho = IsValid( pContainer ) ? pContainer->GetWindowID() : string( "<none>" );
+\tif ( find( dumped.begin(), dumped.end(), szWho ) != dumped.end() )
+\t\treturn;
+\tdumped.push_back( szWho );
+\tif ( !IsValid( pContainer ) )
+\t\treturn;
+\tlist< CPtr<CWindow> > children;
+\tpContainer->GetChildrenList( &children );
+\tcsSystem << "UI-KIDS [" << szWho << "] children=" << (int)children.size() << endl;
+\tfor ( list< CPtr<CWindow> >::iterator i = children.begin(); i != children.end(); ++i )
+\t\tcsSystem << "UI-KIDS [" << szWho << "]   id='" << (*i)->GetWindowID()
+\t\t         << "' pos=" << (*i)->GetPosition().x << "," << (*i)->GetPosition().y
+\t\t         << " size=" << (*i)->GetSize().x << "x" << (*i)->GetSize().y << endl;
+}
+template<class TYPE>
+TYPE* GetUIWindow( CWindow *pContainer, const string &szID )
+{""",
+    ),
+    (
+        "Main/UIWindow.h",
+        "Report a type mismatch as such, and dump the container's children.",
+        """\tcsSystem << "UI-ERROR: UI Container not complete, control " << szID << " in container " << pContainer->GetWindowID() << " not found" << endl;""",
+        """\t// [macos] distinguish 'absent' from 'present but the wrong type'
+\tif ( IsValid( pChild ) )
+\t\tcsSystem << "UI-ERROR: UI Container not complete, control " << szID
+\t\t         << " in container " << pContainer->GetWindowID()
+\t\t         << " is a " << typeid( *pChild ).name() << ", not the expected "
+\t\t         << typeid( TYPE ).name() << endl;
+\telse
+\t\tcsSystem << "UI-ERROR: UI Container not complete, control " << szID << " in container " << pContainer->GetWindowID() << " not found" << endl;
+\ta5_dump_children( pContainer );   // [macos]""",
+    ),
+    (
+        "Main/iUnitPanel.cpp",
+        "The retail squad panel carries the seven hero slots but no per-slot "
+        "selection image, so every highlight was an invisible zero-sized "
+        "stand-in and the panel never showed which unit was selected.  Build "
+        "one over each slot's own rect (they are 110x105, laid out across).",
+        """\t\t\tfor ( int nTemp = 0; nTemp < facesSet.size(); nTemp++ )
+\t\t\t\tselectionsSet[nTemp] = GetUIWindow<CImage>( this, NStr::Format( "hero_%d_selection", ( nTemp + 1 ) ) );""",
+        """\t\t\tfor ( int nTemp = 0; nTemp < facesSet.size(); nTemp++ )
+\t\t\t{
+\t\t\t\t// [macos] see the rule description
+\t\t\t\tconst string szSel = NStr::Format( "hero_%d_selection", ( nTemp + 1 ) );
+\t\t\t\tCWindow *pSlot = GetChildByID( NStr::Format( "hero_%d", ( nTemp + 1 ) ) );
+\t\t\t\tif ( !IsValid( GetChildByID( szSel ) ) && IsValid( pSlot ) )
+\t\t\t\t{
+\t\t\t\t\tCPtr<CImage> pSel = new CImage( SWindowInfo( this, pSlot->GetPosition(), pSlot->GetSize(),
+\t\t\t\t\t\tszSel, STYLE_ENABLED | STYLE_BOTTOMMOST ) );
+\t\t\t\t\tpSel->SetColor( NGfx::SPixel8888( 0xFF, 0xD2, 0x6A, 0x55 ) );
+\t\t\t\t\tselectionsSet[nTemp] = pSel;
+\t\t\t\t\tcontinue;
+\t\t\t\t}
+\t\t\t\tselectionsSet[nTemp] = GetUIWindow<CImage>( this, szSel );
+\t\t\t}""",
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
