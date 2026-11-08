@@ -5364,6 +5364,36 @@ TYPE* GetUIWindow( CWindow *pContainer, const string &szID )
 ]
 
 
+RULES += [
+    (
+        "Main/UIWindow.h",
+        "The retail weapon slot merged the ammo bar and its caption into one "
+        "`ammo` text control -- which is why the panel already reads 30/30 -- "
+        "while this source still asks for `ammo_text` separately.  Alias it, "
+        "the same way `clientview` already aliases to `view`.",
+        """\tif ( !IsValid( pChild ) && szID == "clientview" )   // [android] retail templates say "view"
+\t\tpChild = pContainer->GetChildByID( "view" );""",
+        """\tif ( !IsValid( pChild ) && szID == "clientview" )   // [android] retail templates say "view"
+\t\tpChild = pContainer->GetChildByID( "view" );
+\tif ( !IsValid( pChild ) && szID == "ammo_text" )   // [macos] retail merged bar + caption
+\t\tpChild = pContainer->GetChildByID( "ammo" );""",
+    ),
+    (
+        "Main/iInventoryPanel.cpp",
+        "The retail inventory panel has no `repair` button, but it does have "
+        "the row it belongs in: unload (20,503), arrange (232,503), inventory "
+        "(449,503), all 47x47.  Unload ends at x=67 and arrange starts at 232, "
+        "so a 47-wide button centres at x=126.  Expressed as fractions of the "
+        "panel's 512x564 so it survives a differently sized container.",
+        """\t\t\tpRepair = new CComplexButton( sEvent.pLoader->GetControl( "repair" ),""",
+        """\t\t\t// [macos] see the rule description
+\t\t\tpRepair = new CComplexButton( sEvent.pLoader->HasControl( "repair" )
+\t\t\t\t\t? sEvent.pLoader->GetControl( "repair" )
+\t\t\t\t\t: sEvent.pLoader->MakeInsetControl( "repair", 0.246f, 0.892f, 0.338f, 0.975f ),""",
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
