@@ -163,6 +163,20 @@ struct SCursor
         return r;
     }
     bool Has( const char *pszName ) const { int k, i; return Find( pszName, &k, &i ); }
+    /*  [macos] What this table DOES carry.  A missing column used to report
+     *  only the name that was asked for, which says nothing about what the
+     *  retail schema calls it instead. */
+    std::string ColumnNames() const
+    {
+        std::string r;
+        for ( std::map< std::string, std::pair< int, int > >::const_iterator i = columns.begin();
+              i != columns.end(); ++i )
+        {
+            if ( !r.empty() ) r += ", ";
+            r += i->first;
+        }
+        return r;
+    }
 };
 
 }  // namespace
@@ -341,6 +355,16 @@ static void MissingColumn( const char *pszName )
         seen[ szKey ] = (int)(size_t)NDatabase::table.pTable;
         ++NDatabase::nMissingColumnWarnings;
         a5_log( A5_PRIORITY_WARN, "game.db: column '%s' is not in the table (%d rows) - the record field stays default", pszName, NDatabase::table.pTable ? NDatabase::table.pTable->RowCount() : 0 );
+        {   /* [macos] once per table, say what it does carry */
+            static std::map< const void *, int > listed;
+            const void *pKey = (const void *)NDatabase::table.pTable;
+            if ( pKey && listed.find( pKey ) == listed.end() )
+            {
+                listed[ pKey ] = 1;
+                a5_log( A5_PRIORITY_WARN, "game.db:   that table has: %s",
+                        NDatabase::table.ColumnNames().c_str() );
+            }
+        }
     }
 }
 void NDatabase::ImportField( const char *pszFieldName, int *pData )
