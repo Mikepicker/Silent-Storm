@@ -5456,6 +5456,22 @@ RULES += [
 ]
 
 
+RULES += [
+    (
+        "Main/iMain.cpp",
+        'A failed load took the whole game down.  CICLoad::Exec calls interfaces.clear() BEFORE deserialising, so when the stream throws the interface stack is left empty, the main loop has nothing to run and the process exits.  Clicking an incompatible save -- a retail 32-bit one, say -- quit the game instead of reporting an error.  Keep a copy of the stack and restore it in the catch.',
+        '#ifndef _DEBUG\n\ttry\n#endif\n\t{\n\t\tCFileStream sFile;',
+        '\t// [macos] interfaces.clear() below happens BEFORE the deserialise, so a\n\t// save that throws leaves the stack empty -- the main loop then has\n\t// nothing to run and the game exits.  Keep a copy out here.\n\tlist< CObj<IInterfaceBase> > savedInterfaces = interfaces;\n#ifndef _DEBUG\n\ttry\n#endif\n\t{\n\t\tCFileStream sFile;',
+    ),
+    (
+        "Main/iMain.cpp",
+        'Restore the interface stack on either failure path.',
+        '\t\tcsSystem << "SAVE: load of \\"" << szName << "\\" failed: " << szWhy << endl;\n\t\treturn;\n\t}\n\tcatch(...)\n\t{\n\t\tcsSystem << "SAVE: load of \\"" << szName << "\\" failed (unknown exception)" << endl;\n\t\treturn;\n\t}',
+        '\t\tcsSystem << "SAVE: load of \\"" << szName << "\\" failed: " << szWhy << endl;\n\t\tif ( interfaces.empty() )\n\t\t\tinterfaces = savedInterfaces;   // [macos] do not take the game down with it\n\t\treturn;\n\t}\n\tcatch(...)\n\t{\n\t\tcsSystem << "SAVE: load of \\"" << szName << "\\" failed (unknown exception)" << endl;\n\t\tif ( interfaces.empty() )\n\t\t\tinterfaces = savedInterfaces;   // [macos] do not take the game down with it\n\t\treturn;\n\t}',
+    ),
+]
+
+
 # ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
