@@ -77,17 +77,54 @@ struct SGLCaps
 };
 SGLCaps g_caps;
 
+#ifdef A5_MACOS
+/*  The device's vertex array object -- see CheckGLCaps().  Anything else that
+ *  binds a VAO (the boot console) must leave this one bound for the game. */
+GLuint g_nDeviceVao = 0;
+#endif
+
 void CheckGLCaps()
 {
     if ( g_caps.bChecked )
         return;
     g_caps.bChecked = true;
+#ifdef A5_MACOS
+    /*  glGetString(GL_EXTENSIONS) is NOT valid in a core profile -- it returns
+     *  NULL and leaves a GL_INVALID_ENUM in the queue, which then gets blamed
+     *  on whatever calls glGetError next.  Enumerate properly instead.
+     *
+     *  S3TC is deliberately left off even when present: the macOS build reaches
+     *  glTexStorage2D through an emulation (GL 4.2 is unavailable here) that
+     *  allocates with glTexImage2D, which cannot allocate compressed storage.
+     *  With S3TC off the renderer software-decodes DXT to RGBA8 instead. */
+    {
+        GLint nExt = 0;
+        glGetIntegerv( GL_NUM_EXTENSIONS, &nExt );
+        for ( GLint i = 0; i < nExt; ++i )
+        {
+            const char *pszOne = (const char *)glGetStringi( GL_EXTENSIONS, (GLuint)i );
+            if ( pszOne && strcmp( pszOne, "GL_EXT_texture_filter_anisotropic" ) == 0 )
+                g_caps.bAnisotropy = true;
+        }
+        g_caps.bS3TC = false;
+
+        /*  GLES 2/3 have a default vertex array object, so attribute state can
+         *  be set and draws issued with none bound.  A desktop CORE profile has
+         *  NO default VAO: every glVertexAttribPointer and every glDraw* then
+         *  raises GL_INVALID_OPERATION and draws nothing at all.  One VAO for
+         *  the whole device restores the GLES behaviour. */
+        if ( !g_nDeviceVao )
+            glGenVertexArrays( 1, &g_nDeviceVao );
+        glBindVertexArray( g_nDeviceVao );
+    }
+#else
     const char *pszExt = (const char *)glGetString( GL_EXTENSIONS );
     if ( pszExt )
     {
         g_caps.bS3TC       = strstr( pszExt, "GL_EXT_texture_compression_s3tc" ) != 0;
         g_caps.bAnisotropy = strstr( pszExt, "GL_EXT_texture_filter_anisotropic" ) != 0;
     }
+#endif
     glGetIntegerv( GL_MAX_TEXTURE_SIZE, &g_caps.nMaxTextureSize );
     D3DGL_LOG( "d3d9gles: %s / %s; S3TC=%d anisotropic=%d maxtex=%d",
                (const char *)glGetString( GL_RENDERER ), (const char *)glGetString( GL_VERSION ),
@@ -327,12 +364,43 @@ struct CTexImage
         if ( bSysMem )
             return true;
 
+#ifdef A5_MACOS
+        /*  Drain first: glGetError reports one queued error per call, so a
+         *  stale one from anywhere earlier gets blamed on this function.  That
+         *  misattribution cost real debugging time. */
+        while ( glGetError() != GL_NO_ERROR ) {}
+#endif
         glGenTextures( 1, &nGL );
         glBindTexture( target, nGL );
         GLenum internal = bDecodeDxt ? GL_RGBA8 : fi.internalFormat;
         glTexStorage2D( target, nLevels, internal, w, h );
         glTexParameteri( target, GL_TEXTURE_BASE_LEVEL, 0 );
         glTexParameteri( target, GL_TEXTURE_MAX_LEVEL, nLevels - 1 );
+#ifdef A5_MACOS
+        {
+            /*  Name the texture that failed rather than reporting a bare
+             *  GL_INVALID_ENUM with no context. */
+            const GLenum e = glGetError();
+            if ( e != GL_NO_ERROR )
+            {
+                /*  glTexImage2D(..., NULL) raises INVALID_OPERATION when a
+                 *  PIXEL_UNPACK_BUFFER is bound, because NULL then means
+                 *  "offset 0 into that buffer" and the read runs past its end. */
+                GLint nUnpackBuf = 0, nRowLength = 0, nAlign = 4;
+                glGetIntegerv( GL_PIXEL_UNPACK_BUFFER_BINDING, &nUnpackBuf );
+                glGetIntegerv( GL_UNPACK_ROW_LENGTH, &nRowLength );
+                glGetIntegerv( GL_UNPACK_ALIGNMENT, &nAlign );
+                D3DGL_LOG( "d3d9gles: read FBO texcreate FAILED 0x%04x:"
+                           " target=0x%04x internal=0x%04x levels=%d %dx%d"
+                           " d3dfmt=%d cls=%d dxt=%d decode=%d"
+                           " | unpackbuf=%d rowlen=%d align=%d",
+                           (unsigned)e, (unsigned)target, (unsigned)internal,
+                           (int)nLevels, (int)w, (int)h,
+                           (int)fi.d3d, (int)fi.cls, (int)fi.nDxt, (int)bDecodeDxt,
+                           (int)nUnpackBuf, (int)nRowLength, (int)nAlign );
+            }
+        }
+#endif
         CheckGLError( "CTexImage::Create" );
         return true;
     }
@@ -347,6 +415,9 @@ struct CTexImage
     {
         if ( bSysMem || !nGL )
             return;
+#ifdef A5_MACOS
+        while ( glGetError() != GL_NO_ERROR ) {}
+#endif
         glBindTexture( target, nGL );
         glPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
         const GLenum face = FaceTarget( nFace );
@@ -382,6 +453,21 @@ struct CTexImage
                                 &converted[ (size_t)row * w * fi.nBytesPerPixel ], w );
             glTexSubImage2D( face, nLevel, x, y, w, h, fi.glFormat, fi.glType, &converted[ 0 ] );
         }
+#ifdef A5_MACOS
+        {
+            const GLenum e = glGetError();
+            static int nReported = 0;
+            if ( e != GL_NO_ERROR && nReported < 6 )
+            {
+                ++nReported;
+                D3DGL_LOG( "d3d9gles: read FBO upload FAILED 0x%04x: face=0x%04x level=%d"
+                           " rect=%d,%d %dx%d fmt=0x%04x type=0x%04x d3dfmt=%d cls=%d",
+                           (unsigned)e, (unsigned)face, (int)nLevel, (int)x, (int)y,
+                           (int)w, (int)h, (unsigned)fi.glFormat, (unsigned)fi.glType,
+                           (int)fi.d3d, (int)fi.cls );
+            }
+        }
+#endif
         CheckGLError( "CTexImage::Upload" );
     }
 };
@@ -1279,6 +1365,18 @@ public:
         }
         else
             src = pszSource;
+#ifdef A5_MACOS
+        /*  The shader table is GLSL ES 3.00.  macOS has no GLES; its 4.1 core
+         *  profile speaks desktop GLSL, and GLSL 3.30 is the closest relative
+         *  of ES 3.00 -- same `in`/`out`, same texture() overloads, same
+         *  integer support.  Desktop GLSL has accepted (and ignored) precision
+         *  qualifiers since 1.30, so those lines need no rewriting.          */
+        {
+            const std::string esVersion = "#version 300 es";
+            if ( src.compare( 0, esVersion.size(), esVersion ) == 0 )
+                src.replace( 0, esVersion.size(), "#version 330 core" );
+        }
+#endif
         const char *pszSrc = src.c_str();
         GLuint sh = glCreateShader( type );
         glShaderSource( sh, 1, &pszSrc, 0 );
@@ -1628,6 +1726,58 @@ public:
 
         GLuint src = GetFBO( pBackColorSurface, pBackDepth );
         glBindFramebuffer( GL_READ_FRAMEBUFFER, src );
+#ifdef A5_MACOS
+        /*  One-shot probe: an INVALID_OPERATION from glBlitFramebuffer almost
+         *  always means the read FBO is incomplete, so say so plainly once
+         *  rather than once per frame. */
+        {
+            static int bProbed = 0;
+            if ( !bProbed )
+            {
+                bProbed = 1;
+                const GLenum st = glCheckFramebufferStatus( GL_READ_FRAMEBUFFER );
+                D3DGL_LOG( "d3d9gles: read FBO %u status 0x%04x (%s), back buffer %dx%d",
+                           (unsigned)src, (unsigned)st,
+                           st == GL_FRAMEBUFFER_COMPLETE ? "complete" : "INCOMPLETE",
+                           (int)pp.BackBufferWidth, (int)pp.BackBufferHeight );
+
+                /*  A complete source means glBlitFramebuffer is rejecting the
+                 *  blit itself.  The usual culprits are a sample-count mismatch
+                 *  between the FBO and the window, or an attachment whose type
+                 *  the blit will not filter.  Ask instead of guessing. */
+                GLint nReadSampleBuffers = 0, nReadSamples = 0;
+                glGetIntegerv( GL_SAMPLE_BUFFERS, &nReadSampleBuffers );
+                glGetIntegerv( GL_SAMPLES, &nReadSamples );
+                GLint nAttachType = 0, nAttachName = 0, nRedSize = 0, nComponentType = 0;
+                glGetFramebufferAttachmentParameteriv( GL_READ_FRAMEBUFFER,
+                    GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, &nAttachType );
+                glGetFramebufferAttachmentParameteriv( GL_READ_FRAMEBUFFER,
+                    GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, &nAttachName );
+                glGetFramebufferAttachmentParameteriv( GL_READ_FRAMEBUFFER,
+                    GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &nRedSize );
+                glGetFramebufferAttachmentParameteriv( GL_READ_FRAMEBUFFER,
+                    GL_COLOR_ATTACHMENT0, GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &nComponentType );
+                D3DGL_LOG( "d3d9gles: read FBO attach type=0x%04x name=%d red=%d comp=0x%04x"
+                           "  samples=%d/%d",
+                           (unsigned)nAttachType, (int)nAttachName, (int)nRedSize,
+                           (unsigned)nComponentType, (int)nReadSampleBuffers, (int)nReadSamples );
+
+                glBindFramebuffer( GL_DRAW_FRAMEBUFFER, 0 );
+                GLint nDrawSampleBuffers = 0, nDrawSamples = 0, nDrawRed = 0, nDrawComp = 0;
+                glGetIntegerv( GL_SAMPLE_BUFFERS, &nDrawSampleBuffers );
+                glGetIntegerv( GL_SAMPLES, &nDrawSamples );
+                glGetFramebufferAttachmentParameteriv( GL_DRAW_FRAMEBUFFER,
+                    GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &nDrawRed );
+                glGetFramebufferAttachmentParameteriv( GL_DRAW_FRAMEBUFFER,
+                    GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &nDrawComp );
+                D3DGL_LOG( "d3d9gles: read FBO window red=%d comp=0x%04x samples=%d/%d"
+                           "  window %dx%d",
+                           (int)nDrawRed, (unsigned)nDrawComp,
+                           (int)nDrawSampleBuffers, (int)nDrawSamples, nWinW, nWinH );
+                glBindFramebuffer( GL_READ_FRAMEBUFFER, src );
+            }
+        }
+#endif
         {
             /* A5_D3D_TRACE: histogram of the back buffer so "nothing visible" can be
              * told apart from "drawn but not shown" */
@@ -1659,9 +1809,73 @@ public:
         glClear( GL_COLOR_BUFFER_BIT );
         /* back buffer memory is D3D layout (row 0 = top); the window's row 0 is the
          * bottom, so the blit flips vertically. */
+#ifdef A5_MACOS
+        /*  Isolate the blit: drain first so the error below can only be its
+         *  own.  COUNT what is drained -- these are the frame's draw-call
+         *  errors, and silently discarding them hid the missing VAO. */
+        {
+            int nDrained = 0;
+            GLenum eFirst = GL_NO_ERROR, e;
+            while ( ( e = glGetError() ) != GL_NO_ERROR )
+            {
+                if ( !nDrained ) eFirst = e;
+                if ( ++nDrained > 64 ) break;
+            }
+            static int nDrainReported = 0;
+            if ( nDrained && nDrainReported < 3 )
+            {
+                ++nDrainReported;
+                D3DGL_LOG( "d3d9gles: read FBO frame errors: %d drained this frame,"
+                           " first 0x%04x (these come from the draw calls)",
+                           nDrained, (unsigned)eFirst );
+            }
+        }
+#endif
         glBlitFramebuffer( 0, 0, pp.BackBufferWidth, pp.BackBufferHeight,
                            dx, dy + dh, dx + dw, dy, GL_COLOR_BUFFER_BIT, GL_LINEAR );
+#ifdef A5_MACOS
+        {
+            const GLenum eBlit = glGetError();
+            static int nBlitReported = 0;
+            if ( eBlit != GL_NO_ERROR && nBlitReported < 3 )
+            {
+                ++nBlitReported;
+                const GLenum stDraw = glCheckFramebufferStatus( GL_DRAW_FRAMEBUFFER );
+                D3DGL_LOG( "d3d9gles: read FBO BLIT FAILED 0x%04x: src 0,0..%dx%d ->"
+                           " dst %d,%d..%d,%d  drawfb=0x%04x readfb=%u win %dx%d",
+                           (unsigned)eBlit, (int)pp.BackBufferWidth, (int)pp.BackBufferHeight,
+                           dx, dy + dh, dx + dw, dy, (unsigned)stDraw, (unsigned)src,
+                           nWinW, nWinH );
+            }
+            else if ( eBlit == GL_NO_ERROR && nBlitReported == 0 )
+            {
+                nBlitReported = 1;
+                D3DGL_LOG( "d3d9gles: read FBO blit OK: src %dx%d -> dst %d,%d %dx%d",
+                           (int)pp.BackBufferWidth, (int)pp.BackBufferHeight,
+                           dx, dy, dw, dh );
+            }
+        }
+#endif
+#ifdef A5_MACOS
+        /*  Report the per-frame error a few times, not once per frame: the
+         *  spam buries every other diagnostic. */
+        if ( g_stats.nPresents < 3 )
+            CheckGLError( "Present" );
+        else
+            glGetError();
+#else
         CheckGLError( "Present" );
+#endif
+#ifdef A5_MACOS
+        /*  Is the engine drawing at all?  nDrawsNoProgram counts draws skipped
+         *  for want of a usable vs/ps pair -- the difference between "nothing
+         *  submitted" and "submitted but no shader". */
+        if ( g_stats.nPresents < 4 || ( g_stats.nPresents % 120 ) == 0 )
+            D3DGL_LOG( "d3d9gles: read FBO frame %d: draws=%d noprogram=%d clears=%d glerrors=%d",
+                       (int)g_stats.nPresents, (int)g_stats.nDraws,
+                       (int)g_stats.nDrawsNoProgram, (int)g_stats.nClears,
+                       (int)g_stats.nGLErrors );
+#endif
         if ( g_hooks.present )
             g_hooks.present();
         ++g_stats.nPresents;
@@ -1670,7 +1884,17 @@ public:
         bStatesDirty = true;
         return D3D_OK;
     }
-    virtual HRESULT BeginScene() { bInScene = true; return D3D_OK; }
+    virtual HRESULT BeginScene()
+    {
+#ifdef A5_MACOS
+        /*  Re-assert the device VAO each frame: the boot console binds its own
+         *  while it draws, and a core profile draws nothing with the wrong one. */
+        if ( g_nDeviceVao )
+            glBindVertexArray( g_nDeviceVao );
+#endif
+        bInScene = true;
+        return D3D_OK;
+    }
     virtual HRESULT EndScene()   { bInScene = false; return D3D_OK; }
     virtual HRESULT ValidateDevice( DWORD *pNumPasses ) { if ( pNumPasses ) *pNumPasses = 1; return D3D_OK; }
     virtual void    SetGammaRamp( UINT, DWORD, const D3DGAMMARAMP *pRamp ) { if ( pRamp ) gamma = *pRamp; }

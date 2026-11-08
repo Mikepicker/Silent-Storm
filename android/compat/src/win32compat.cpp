@@ -1237,20 +1237,59 @@ void FillFindData( struct _finddata_t *pOut, const WIN32_FIND_DATAA &in )
 }
 }  // namespace
 
+/*  Handles are handed out as small table indices, NOT raw pointers.
+ *
+ *  The engine stores what _findfirst returns in a 32-bit type -- fine on 32-bit
+ *  Windows, where intptr_t is 32 bits.  In a 64-bit build a heap pointer loses
+ *  its high word on the way in, and _findnext then dereferences the truncated
+ *  value: e.g. 0x0000000a1aa60de0 arrives back as 0x000000001dceb840.
+ *  Indices survive the round trip intact. */
+namespace {
+std::vector< HANDLE > g_findHandles;
+
+HANDLE FindHandleFromId( intptr_t id )
+{
+    if ( id <= 0 || (size_t)id > g_findHandles.size() )
+        return INVALID_HANDLE_VALUE;
+    return g_findHandles[ (size_t)id - 1 ];
+}
+}  // namespace
+
 extern "C" intptr_t _findfirst( const char *pszFileSpec, struct _finddata_t *pFileInfo )
 {
+    if ( !pFileInfo )
+        return -1;
     WIN32_FIND_DATAA data;
     HANDLE h = FindFirstFileA( pszFileSpec, &data );
     if ( h == INVALID_HANDLE_VALUE )
         return -1;
     FillFindData( pFileInfo, data );
-    return (intptr_t)h;
+
+    /*  Reuse a freed slot if there is one, so a long session does not grow the
+     *  table without bound. */
+    for ( size_t i = 0; i < g_findHandles.size(); ++i )
+        if ( g_findHandles[ i ] == INVALID_HANDLE_VALUE )
+        {
+            g_findHandles[ i ] = h;
+            return (intptr_t)( i + 1 );
+        }
+    g_findHandles.push_back( h );
+    return (intptr_t)g_findHandles.size();
 }
 
 extern "C" int _findnext( intptr_t hFile, struct _finddata_t *pFileInfo )
 {
+    /*  _findfirst returns -1 when nothing matches, and callers do not always
+     *  check before looping -- CSaveManager::GetSlotsList does exactly that
+     *  with an empty save directory.  On Windows the CRT rejects the bad
+     *  handle and returns -1; dereferencing it here is a segfault instead. */
+    if ( !pFileInfo )
+        return -1;
+    const HANDLE h = FindHandleFromId( hFile );
+    if ( h == INVALID_HANDLE_VALUE )
+        return -1;
     WIN32_FIND_DATAA data;
-    if ( !FindNextFileA( (HANDLE)hFile, &data ) )
+    if ( !FindNextFileA( h, &data ) )
         return -1;
     FillFindData( pFileInfo, data );
     return 0;
@@ -1258,7 +1297,11 @@ extern "C" int _findnext( intptr_t hFile, struct _finddata_t *pFileInfo )
 
 extern "C" int _findclose( intptr_t hFile )
 {
-    return FindClose( (HANDLE)hFile ) ? 0 : -1;
+    const HANDLE h = FindHandleFromId( hFile );
+    if ( h == INVALID_HANDLE_VALUE )
+        return -1;
+    g_findHandles[ (size_t)hFile - 1 ] = INVALID_HANDLE_VALUE;   /* free the slot */
+    return FindClose( h ) ? 0 : -1;
 }
 
 extern "C" UINT GetDoubleClickTime( void ) { return A5_DOUBLE_CLICK_MS; }

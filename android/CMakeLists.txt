@@ -118,6 +118,24 @@ if(ANDROID)
     target_include_directories(a5d3d9gles PUBLIC
         ${COMPAT_DIR}/d3d9gles ${COMPAT_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${PLATFORM_DIR})
     target_link_libraries(a5d3d9gles PUBLIC a5compat GLESv3 EGL)
+elseif(APPLE)
+    #  macOS: same renderer, on the 4.1 core profile of OpenGL.framework.
+    #  compat/macos/ supplies the GLES3/GLES2 header spellings and emulates
+    #  glTexStorage2D (GL 4.2; macOS stops at 4.1).  There is no EGL here --
+    #  d3d9gles.cpp makes no EGL calls; context creation lives in the platform
+    #  layer, as it does on Android.
+    add_library(a5d3d9gles STATIC
+        ${COMPAT_DIR}/d3d9gles/d3d9gles.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/shaders/glsl_table.cpp
+        ${PLATFORM_DIR}/dxt_decode.cpp
+    )
+    target_include_directories(a5d3d9gles PUBLIC
+        ${COMPAT_DIR}/macos
+        ${COMPAT_DIR}/d3d9gles ${COMPAT_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}/shaders ${PLATFORM_DIR})
+    target_compile_definitions(a5d3d9gles PUBLIC A5_MACOS=1 GL_SILENCE_DEPRECATION=1)
+    target_compile_options(a5d3d9gles PRIVATE ${ENGINE_COMPILE_OPTIONS})
+    find_library(A5_OPENGL_FRAMEWORK OpenGL REQUIRED)
+    target_link_libraries(a5d3d9gles PUBLIC a5compat ${A5_OPENGL_FRAMEWORK})
 endif()
 
 # ---------------------------------------------------------------------------
@@ -272,6 +290,12 @@ if(A5_BUILD_MAIN)
     #  siblings as "Foo.h", which resolves relative to the including file and
     #  needs no -I.
     target_include_directories(a5main PUBLIC ${COMPAT_DIR}/include ${ENGINE_GEN} ${PLATFORM_DIR})
+    if(APPLE)
+        #  Main reaches the renderer through compat/d3d9gles, whose headers are
+        #  GLES-spelled; compat/macos/ maps them onto OpenGL.framework.
+        target_include_directories(a5main PUBLIC ${COMPAT_DIR}/macos)
+        target_compile_definitions(a5main PUBLIC A5_MACOS=1 GL_SILENCE_DEPRECATION=1)
+    endif()
     target_compile_definitions(a5main PUBLIC ${ENGINE_DEFINITIONS})
     target_compile_options(a5main PRIVATE ${ENGINE_COMPILE_OPTIONS} -ferror-limit=0)
     target_link_libraries(a5main PUBLIC a5compat)
@@ -313,6 +337,76 @@ if(NOT ANDROID)
     #  audio_decode_test: decode every file given, compare WAVs with ffmpeg.
     add_executable(silentstorm_audiotest ${CMAKE_CURRENT_SOURCE_DIR}/tools/audio_decode_test.cpp)
     target_link_libraries(silentstorm_audiotest a5audiodecode)
+    #  Run the boot harness against a real game install as a CTest case, so it is
+    #  repeatable.  Override the data directory with -DA5_GAME_DATA=<path>.
+    set(A5_GAME_DATA "" CACHE PATH "game data directory for the boot harness test")
+    if(A5_GAME_DATA)
+        add_test(NAME boot_harness COMMAND silentstorm_hosttest "${A5_GAME_DATA}")
+    endif()
+    #  macos_shader_test: compile all translated shaders on the real GL driver,
+    #  headlessly via CGL.  Proves the ES 3.00 -> GLSL 330 core rewrite works.
+    if(APPLE AND TARGET a5d3d9gles)
+        add_executable(silentstorm_shadertest ${CMAKE_CURRENT_SOURCE_DIR}/tools/macos_shader_test.cpp)
+        target_include_directories(silentstorm_shadertest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+        target_link_libraries(silentstorm_shadertest a5d3d9gles)
+        add_test(NAME macos_shaders COMMAND silentstorm_shadertest)
+
+        #  silentstorm_mac: the windowed entry point.  SDL2 supplies the Cocoa
+        #  window, the GL context and input, standing in for NativeActivity+EGL.
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(SDL2 QUIET sdl2)
+        endif()
+        if(SDL2_FOUND)
+            add_executable(silentstorm_mac
+                ${PLATFORM_DIR}/macos_main.cpp
+                ${PLATFORM_DIR}/gles_present.cpp
+                ${PLATFORM_DIR}/text_font.cpp
+                ${PLATFORM_DIR}/boot_harness.cpp
+                ${PLATFORM_DIR}/data_mount.cpp
+                ${PLATFORM_DIR}/dxt_decode.cpp
+                ${PLATFORM_DIR}/script_prelude.cpp
+            )
+            target_include_directories(silentstorm_mac PRIVATE
+                ${COMPAT_DIR}/macos ${COMPAT_DIR}/include ${ENGINE_GEN} ${PLATFORM_DIR}
+                ${SDL2_INCLUDE_DIRS})
+            target_compile_definitions(silentstorm_mac PRIVATE A5_MACOS=1 GL_SILENCE_DEPRECATION=1)
+            target_compile_options(silentstorm_mac PRIVATE ${ENGINE_COMPILE_OPTIONS} ${SDL2_CFLAGS_OTHER})
+            target_link_directories(silentstorm_mac PRIVATE ${SDL2_LIBRARY_DIRS})
+            target_link_libraries(silentstorm_mac
+                a5script a5dbformat a5image a5miscdll a5fileio a5misc a5compat
+                ${SDL2_LIBRARIES} ${A5_OPENGL_FRAMEWORK})
+            set_property(TARGET silentstorm_mac PROPERTY LINK_LIBRARY_OVERRIDE
+                "WHOLE_ARCHIVE,a5script,a5dbformat,a5image,a5miscdll,a5fileio,a5misc")
+
+            #  With -DA5_BUILD_MAIN=ON the window runs the actual game rather
+            #  than only the boot console.  Whole-archive again: the engine
+            #  registers classes, console commands and database tables from
+            #  static initialisers in objects nothing else references.
+            if(TARGET a5main)
+                a5_engine_module(a5mainshaders ${ENGINE_GEN}/Main/GfxShaders.cpp)
+                target_include_directories(a5mainshaders PUBLIC
+                    ${COMPAT_DIR}/d3d9gles ${COMPAT_DIR}/macos)
+                #  audio_null.cpp implements the engine's NFMSound interface
+                #  without FMOD; input_android.cpp implements NInput and is
+                #  portable apart from <android/keycodes.h>, which compat/macos
+                #  supplies.  macos_main feeds it the same key codes from SDL.
+                target_sources(silentstorm_mac PRIVATE
+                    ${PLATFORM_DIR}/game_entry.cpp
+                    ${PLATFORM_DIR}/audio_null.cpp
+                    ${PLATFORM_DIR}/input_android.cpp)
+                target_include_directories(silentstorm_mac PRIVATE ${COMPAT_DIR}/d3d9gles)
+                target_compile_definitions(silentstorm_mac PRIVATE A5_HAVE_MAIN=1)
+                target_link_libraries(silentstorm_mac a5main a5mainshaders a5d3d9gles)
+                set_property(TARGET silentstorm_mac PROPERTY LINK_LIBRARY_OVERRIDE
+                    "WHOLE_ARCHIVE,a5script,a5dbformat,a5image,a5miscdll,a5fileio,a5misc,a5main,a5mainshaders")
+                message(STATUS "silentstorm_mac: Main module linked - game loop enabled")
+            endif()
+            message(STATUS "silentstorm_mac: SDL2 ${SDL2_VERSION} found - windowed target enabled")
+        else()
+            message(STATUS "silentstorm_mac: SDL2 not found - windowed target skipped")
+        endif()
+    endif()
     return()
 endif()
 

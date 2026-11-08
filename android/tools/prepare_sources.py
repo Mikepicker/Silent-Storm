@@ -4902,6 +4902,230 @@ def apply_rules(text, rel_path, applied, unmatched):
 
 
 # ---------------------------------------------------------------------------
+#  macOS / arm64
+#
+#  The 2003 code treats `int` and "pointer" as interchangeable.  That is
+#  harmless on Win32 and fatal on any 64-bit target: every one of these stores
+#  an address in an `int`, losing the high word.  An arm64 image loads at
+#  0x1_0000_0000, so a function at 0x1_0087_4cd0 comes back as 0x0087_4cd0.
+#  Found on macOS; all of them are latent on 64-bit Android too.
+# ---------------------------------------------------------------------------
+RULES += [
+    (
+        "Script/lsaver.cpp",
+        "LUA C-function addresses were kept in int-keyed maps, so every restored "
+        "function pointed 4GB below itself and the first script step after a load "
+        "jumped into unmapped memory.  The save FILE is fine -- it stores names.",
+        """typedef hash_map<CLuaFuncID, int> CLuaIDToFuncMap;
+typedef hash_map<int, CLuaFuncID> CLuaFuncToIDMap;""",
+        """// [macos/64-bit] were keyed on `int`, truncating every function address.
+typedef hash_map<CLuaFuncID, uintptr_t> CLuaIDToFuncMap;
+typedef hash_map<uintptr_t, CLuaFuncID> CLuaFuncToIDMap;""",
+    ),
+    (
+        "Script/lsaver.cpp",
+        "Widen the three pointer->integer casts that feed those maps.",
+        "int nFunc = reinterpret_cast<int>( func );",
+        "uintptr_t nFunc = reinterpret_cast<uintptr_t>( func );",
+    ),
+    (
+        "Script/lsaver.cpp",
+        "Widen the C-function reader.",
+        """	int nFunc = i->second;
+	return ( lua_CFunction )nFunc;""",
+        """	uintptr_t nFunc = i->second;
+	return ( lua_CFunction )nFunc;""",
+    ),
+    (
+        "Script/lsaver.cpp",
+        "Widen the debug-hook reader.",
+        """	int nFunc = i->second;
+	return ( lua_Hook )nFunc;""",
+        """	uintptr_t nFunc = i->second;
+	return ( lua_Hook )nFunc;""",
+    ),
+    (
+        "Main/aiHeight.cpp",
+        "AI terrain analysis keyed a hash_map on CObjectBase* cast through int. "
+        "Insert and lookup truncate alike so it never crashed, but two objects "
+        "differing only above bit 32 collide and yield a wrong height sample.",
+        "	hash_map<int, bool> hSources;",
+        "	// [macos/64-bit] was hash_map<int,bool>: the keys are object addresses.\n"
+        "	hash_map<uintptr_t, bool> hSources;",
+    ),
+    (
+        "Main/aiHeight.cpp",
+        "Widen the accumulator for those keys.",
+        "		int pI = 0;",
+        "		uintptr_t pI = 0;",
+    ),
+    (
+        "Main/aiHeight.cpp",
+        "Widen the insert-side cast.",
+        "				pI = reinterpret_cast<int>( pObj );",
+        "				pI = reinterpret_cast<uintptr_t>( pObj );",
+    ),
+    (
+        "Main/aiHeight.cpp",
+        "Widen the lookup-side cast.",
+        "				int pInfo = reinterpret_cast<int>( pObj );",
+        "				uintptr_t pInfo = reinterpret_cast<uintptr_t>( pObj );",
+    ),
+    (
+        "Misc/BasicFactory.h",
+        "SDefaultPtrHash returned (int)pData.  Only a hash -- equality still "
+        "compares the whole pointer -- so it cost bucket collisions rather than "
+        "correctness, but it warned on every 64-bit build.",
+        "	int operator()( const void *pData ) const { return (int)pData; }",
+        "	// [macos/64-bit] was (int)pData, dropping the high word of every pointer.\n"
+        "	size_t operator()( const void *pData ) const\n"
+        "	{ return reinterpret_cast<uintptr_t>( pData ); }",
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+#  macOS: retail-vs-source skew found by running the game on a Mac
+# ---------------------------------------------------------------------------
+RULES += [
+    (
+        "Main/iSideMenu.cpp",
+        "Side select was the only screen asking for two separate text lines "
+        "with one FULL-WIDTH control each -- and a full-width control is "
+        "centred, so BACK and NEXT were drawn on top of each other.  Lay them "
+        "out 2-up on line 1 like every other screen (iCharGen 2-up, iHeroMenu "
+        "3-up, iMainMenu 5-up).",
+        """					pBack = new CHoverButton( sEvent.pLoader->MakeLineControl( "cancel", 2, 0, 1 ) );""",
+        """					pBack = new CHoverButton( sEvent.pLoader->MakeLineControl( "cancel", 1, 0, 2 ) );""",
+    ),
+    (
+        "Main/iSideMenu.cpp",
+        "NEXT takes the right half of the same line.",
+        """					pNext = new CScriptHoverButton( sEvent.pLoader->MakeLineControl( "next", 1, 0, 1 ), pInterface );""",
+        """					pNext = new CScriptHoverButton( sEvent.pLoader->MakeLineControl( "next", 1, 1, 2 ), pInterface );""",
+    ),
+    (
+        "Main/iSideMenu.cpp",
+        "AXIS/ALLIES are 233x166 boxes laid over the two dossiers in the 3D "
+        "view, but CButton::AddTextState fills the box and the ML layout starts "
+        "its block at the TOP -- so each label drew ~70px above its folder, "
+        "outside the control you had to click.  <middle> does not help: eVAlign "
+        "aligns within a LINE, and for a one-line label line height == text "
+        "height.  Place the text explicitly instead.  Helper.",
+        """void CSideMenuUI::Draw( const STime &sTime, NGScene::I2DGameView *pView )   // [android]
+{""",
+        """// [macos] Centre a button's caption in its box; see the rule description.
+static void AddCenteredTextState( CButton *pButton, int nState, const u16string &wsText )
+{
+	CWindow *pState = pButton->AddState( nState );
+	const SPoint sBox = pState->GetSize();
+	CPtr<CMLText> pText = new CMLText( SWindowInfo( pState, SPoint( 0, 0 ), sBox, "iml-text",
+		STYLE_ENABLED | STYLE_VISIBLE | STYLE_TRANSPARENT ) );
+	pText->SetText( wsText );
+
+	SPoint sReal;
+	pText->GetRealSize( &sReal );
+	const int nTop = Max( 0, ( sBox.y - sReal.y ) / 2 );
+	pText->SetPosition( SPoint( 0, nTop ) );
+	pText->SetSize( SPoint( sBox.x, sBox.y - nTop ) );
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////
+void CSideMenuUI::Draw( const STime &sTime, NGScene::I2DGameView *pView )   // [android]
+{""",
+    ),
+    (
+        "Main/iSideMenu.cpp",
+        "Use the centring helper for the two dossier labels.",
+        """					pAxis = new CScriptHoverButton( sEvent.pLoader->GetControl( "axis" ), pInterface );
+					pAxis->AddTextState( CHoverButton::STATE_HOVER, GetDBString( 11130 ) + u"<center>" + GetDBString( 11131 ) );
+					pAxis->AddTextState( CHoverButton::STATE_NORMAL, GetDBString( 11129 ) + u"<center>" + GetDBString( 11131 ) );
+					pAllies = new CScriptHoverButton( sEvent.pLoader->GetControl( "allies" ), pInterface );
+					pAllies->AddTextState( CHoverButton::STATE_HOVER, GetDBString( 11130 ) + u"<center>" + GetDBString( 11132 ) );
+					pAllies->AddTextState( CHoverButton::STATE_NORMAL, GetDBString( 11129 ) + u"<center>" + GetDBString( 11132 ) );""",
+        """					pAxis = new CScriptHoverButton( sEvent.pLoader->GetControl( "axis" ), pInterface );
+					AddCenteredTextState( pAxis, CHoverButton::STATE_HOVER, GetDBString( 11130 ) + u"<center>" + GetDBString( 11131 ) );
+					AddCenteredTextState( pAxis, CHoverButton::STATE_NORMAL, GetDBString( 11129 ) + u"<center>" + GetDBString( 11131 ) );
+					pAllies = new CScriptHoverButton( sEvent.pLoader->GetControl( "allies" ), pInterface );
+					AddCenteredTextState( pAllies, CHoverButton::STATE_HOVER, GetDBString( 11130 ) + u"<center>" + GetDBString( 11132 ) );
+					AddCenteredTextState( pAllies, CHoverButton::STATE_NORMAL, GetDBString( 11129 ) + u"<center>" + GetDBString( 11132 ) );""",
+    ),
+    (
+        "Main/iSaveLoad.cpp",
+        "The retail load container has no tab_save_text, so GetControl handed "
+        "back a zero-sized style-0 stand-in (invisible and unclickable) and the "
+        "Save tab could not be reached from the Load screen.",
+        """			pSaveTabText = new CHoverButton( sEvent.pLoader->GetControl( "tab_save_text" ) );""",
+        """			pSaveTabText = new CHoverButton( sEvent.pLoader->HasControl( "tab_save_text" )   // [macos]
+				? sEvent.pLoader->GetControl( "tab_save_text" )
+				: sEvent.pLoader->MakeLineControl( "tab_save_text", 2, 0, 2 ) );""",
+    ),
+    (
+        "Main/iSaveManager.h",
+        "The retail Gold Edition writes a save magic one revision ahead of this "
+        "source: 0x828CA022, which is 0x818B9F21 with every byte +1.",
+        "const int N_SAVE_MAGIC_NUMBER = 0x818B9F21;",
+        "const int N_SAVE_MAGIC_NUMBER = 0x818B9F21;\n"
+        "// [macos] retail Gold Edition magic: every byte of the above +1\n"
+        "const int N_SAVE_MAGIC_RETAIL = 0x828CA022;",
+    ),
+    (
+        "Main/iMain.cpp",
+        "Accept the retail save magic as well, and say which one was seen.",
+        """		if ( sHeader.nMagic != N_SAVE_MAGIC_NUMBER )
+			throw u"Invalid save file";""",
+        """		if ( sHeader.nMagic != N_SAVE_MAGIC_NUMBER && sHeader.nMagic != N_SAVE_MAGIC_RETAIL )   // [macos]
+		{
+			csSystem << "SAVE: bad magic " << sHeader.nMagic << " in slot \\"" << szName << "\\"" << endl;
+			throw u"Invalid save file";
+		}
+		csSystem << "SAVE: magic " << sHeader.nMagic << " accepted, deserialising slot \\"" << szName << "\\"" << endl;""",
+    ),
+    (
+        "Main/iMain.cpp",
+        "Loading failures were swallowed: catch(...) then ASSERT, which compiles "
+        "out in release, so a failed Load Game did nothing at all and said "
+        "nothing.  Report the reason instead.",
+        """	catch(...)
+	{
+		ASSERT( 0 && "Loading failed!" );
+		return;
+	}
+#endif
+
+	pSaveManager->LoadSlot( szName );""",
+        """	catch( const char16_t *pszWhy )   // [macos]
+	{
+		string szWhy;
+		for ( const char16_t *p = pszWhy; p && *p; ++p )
+			szWhy += (char)( *p < 128 ? *p : '?' );
+		csSystem << "SAVE: load of \\"" << szName << "\\" failed: " << szWhy << endl;
+		return;
+	}
+	catch(...)
+	{
+		csSystem << "SAVE: load of \\"" << szName << "\\" failed (unknown exception)" << endl;
+		return;
+	}
+#endif
+
+	csSystem << "SAVE: deserialised \\"" << szName << "\\" OK, activating slot" << endl;
+	pSaveManager->LoadSlot( szName );""",
+    ),
+    (
+        "Main/iMissionUI.cpp",
+        "Mission camera edge-scrolling used a 4-pixel guard band.  That is fine "
+        "when the game owns the whole screen, but in a window it sits under the "
+        "frame -- measured, scrolling only began about 1px from the edge.  16 is "
+        "reachable without stealing the panel edge.  (Keyboard scrolling was "
+        "never broken: input.cfg binds the arrows to camera_forward/strafe and "
+        "Camera.cpp polls them; it just needs a HELD key, not taps.)",
+        """	N_SCROLL_GUARDBAND	= 4;""",
+        """	N_SCROLL_GUARDBAND	= 16;   // [macos] was 4: unreachable in a window""",
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 #  Driver
 # ---------------------------------------------------------------------------
 def vcproj_source_list(vcproj_path):

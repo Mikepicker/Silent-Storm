@@ -24,6 +24,41 @@ struct SVertex
 
 std::vector< SVertex > g_vertices;
 
+#ifdef A5_MACOS
+/*  macOS has no GLES and no compatibility profile above 2.1, so the console
+ *  runs in a 3.3 core context.  That removes attribute/varying/gl_FragColor,
+ *  client-side vertex arrays and the default VAO -- hence the core-profile
+ *  spellings here and the VAO/VBO in Init()/Flush().                         */
+const char *VERTEX_SHADER =
+    "#version 330 core\n"
+    "in vec2 aPosition;\n"
+    "in vec2 aTexCoord;\n"
+    "in vec4 aColour;\n"
+    "uniform mat4 uProjection;\n"
+    "out vec2 vTexCoord;\n"
+    "out vec4 vColour;\n"
+    "void main() {\n"
+    "    vTexCoord = aTexCoord;\n"
+    "    vColour = aColour;\n"
+    "    gl_Position = uProjection * vec4( aPosition, 0.0, 1.0 );\n"
+    "}\n";
+
+const char *FRAGMENT_SHADER =
+    "#version 330 core\n"
+    "uniform sampler2D uTexture;\n"
+    "in vec2 vTexCoord;\n"
+    "in vec4 vColour;\n"
+    "out vec4 fragColour;\n"
+    "void main() {\n"
+    "    float coverage = texture( uTexture, vTexCoord ).a;\n"
+    "    fragColour = vec4( vColour.rgb, vColour.a * coverage );\n"
+    "}\n";
+
+/*  Core profile needs a bound VAO to draw at all, and vertex data must live in
+ *  a buffer object.  One of each, created lazily, serves the whole console.   */
+static GLuint g_nConsoleVao = 0;
+static GLuint g_nConsoleVbo = 0;
+#else
 const char *VERTEX_SHADER =
     "attribute vec2 aPosition;\n"
     "attribute vec2 aTexCoord;\n"
@@ -46,6 +81,7 @@ const char *FRAGMENT_SHADER =
     "    float coverage = texture2D( uTexture, vTexCoord ).a;\n"
     "    gl_FragColor = vec4( vColour.rgb, vColour.a * coverage );\n"
     "}\n";
+#endif
 
 GLuint CompileShader( GLenum type, const char *pszSource )
 {
@@ -126,8 +162,18 @@ bool CBootConsole::Init()
     glGenTextures( 1, &m_nFontTexture );
     glBindTexture( GL_TEXTURE_2D, m_nFontTexture );
     glPixelStorei( GL_UNPACK_ALIGNMENT, 1 );
+#ifdef A5_MACOS
+    /*  GL_ALPHA was removed in the core profile: a texture declared with it is
+     *  incomplete, so the driver substitutes the zero texture and every glyph
+     *  samples alpha = 1 (solid blocks instead of letters).  GL_R8 is the core
+     *  equivalent; swizzling A <- R keeps the shared shader's .a sampling. */
+    glTexImage2D( GL_TEXTURE_2D, 0, GL_R8, FONT_ATLAS_W, FONT_ATLAS_H, 0,
+                  GL_RED, GL_UNSIGNED_BYTE, &atlas[ 0 ] );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_RED );
+#else
     glTexImage2D( GL_TEXTURE_2D, 0, GL_ALPHA, FONT_ATLAS_W, FONT_ATLAS_H, 0,
                   GL_ALPHA, GL_UNSIGNED_BYTE, &atlas[ 0 ] );
+#endif
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
@@ -137,7 +183,12 @@ bool CBootConsole::Init()
     const unsigned char white = 0xFF;
     glGenTextures( 1, &m_nWhiteTexture );
     glBindTexture( GL_TEXTURE_2D, m_nWhiteTexture );
+#ifdef A5_MACOS
+    glTexImage2D( GL_TEXTURE_2D, 0, GL_R8, 1, 1, 0, GL_RED, GL_UNSIGNED_BYTE, &white );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_RED );
+#else
     glTexImage2D( GL_TEXTURE_2D, 0, GL_ALPHA, 1, 1, 0, GL_ALPHA, GL_UNSIGNED_BYTE, &white );
+#endif
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST );
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST );
 
@@ -256,12 +307,36 @@ void CBootConsole::Flush()
     glBindTexture( GL_TEXTURE_2D, m_nBoundTexture );
     const SVertex *pBase = &g_vertices[ 0 ];
 
+#ifdef A5_MACOS
+    /*  Core profile: the vertices must come from a buffer, and a VAO must be
+     *  bound.  Offsets below mirror the client-side pointers used elsewhere. */
+    if ( !g_nConsoleVao )
+    {
+        glGenVertexArrays( 1, &g_nConsoleVao );
+        glGenBuffers( 1, &g_nConsoleVbo );
+    }
+    glBindVertexArray( g_nConsoleVao );
+    glBindBuffer( GL_ARRAY_BUFFER, g_nConsoleVbo );
+    glBufferData( GL_ARRAY_BUFFER,
+                  (GLsizeiptr)( g_vertices.size() * sizeof( SVertex ) ),
+                  pBase, GL_STREAM_DRAW );
+    glEnableVertexAttribArray( m_nAttribPosition );
+    glEnableVertexAttribArray( m_nAttribTexCoord );
+    glEnableVertexAttribArray( m_nAttribColour );
+    glVertexAttribPointer( m_nAttribPosition, 2, GL_FLOAT, GL_FALSE, sizeof( SVertex ),
+                           (const void*)offsetof( SVertex, x ) );
+    glVertexAttribPointer( m_nAttribTexCoord, 2, GL_FLOAT, GL_FALSE, sizeof( SVertex ),
+                           (const void*)offsetof( SVertex, u ) );
+    glVertexAttribPointer( m_nAttribColour, 4, GL_FLOAT, GL_FALSE, sizeof( SVertex ),
+                           (const void*)offsetof( SVertex, r ) );
+#else
     glVertexAttribPointer( m_nAttribPosition, 2, GL_FLOAT, GL_FALSE, sizeof( SVertex ),
                            &pBase->x );
     glVertexAttribPointer( m_nAttribTexCoord, 2, GL_FLOAT, GL_FALSE, sizeof( SVertex ),
                            &pBase->u );
     glVertexAttribPointer( m_nAttribColour, 4, GL_FLOAT, GL_FALSE, sizeof( SVertex ),
                            &pBase->r );
+#endif
     glDrawArrays( GL_TRIANGLES, 0, (GLsizei)g_vertices.size() );
 
     m_nVertexCount += (int)g_vertices.size();
