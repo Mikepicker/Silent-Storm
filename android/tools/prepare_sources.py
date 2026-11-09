@@ -5649,6 +5649,34 @@ RULES += [
     ),
 ]
 
+
+RULES += [
+    (
+        "Main/RPGUnit.h",
+        'Declare CUnit::EquipFromLoadout, which arms mission enemies from the retail WeaponInHand / WeaponInBackpack templates this source predates.',
+        '\tconst u16string& GetName() const;\n',
+        '\tconst u16string& GetName() const;\n\t// [macos] Arm a unit from the retail loadout templates; see a5_loadout.h.\n\tvoid EquipFromLoadout( int nLevel, int nSeed );\n',
+    ),
+    (
+        "Main/RPGUnit.cpp",
+        'RPGUnit.cpp needs the loadout table accessors (platform/a5_loadout.h).',
+        '#include "RPGUnit.h"\n',
+        '#include "RPGUnit.h"\n#include "a5_loadout.h"   // [macos] retail enemy loadout templates\n',
+    ),
+    (
+        "Main/RPGUnit.cpp",
+        'CUnit::EquipFromLoadout: turn a loadout pick into real inventory items.  Resolves each RPGItemID to its subtype record through CRPGItem::pSuccessor (CreateItem dispatches on the subtype, not on the item), equips the first firearm into SLOT_1 and stows the rest.  It only ever fills an empty weapon slot, so named characters armed through the old WeaponID column are untouched, and it is a no-op on a game.db without the loadout tables.',
+        'const u16string& CUnit::GetName() const\n',
+        '// [macos] Mission enemies spawn unarmed on retail data: CRPGPers::pWeapon comes\n// from the Pers table\'s WeaponID, which is null for every generic enemy template\n// (AxisSoldier, AxisRifleman, AxisOfficer ...).  Retail moved their equipment to\n// WeaponInHand / WeaponInBackpack, which name a weapon-set template, and the\n// template resolves through a weighted, level-banded bundle to a chest of items\n// -- a system added to the engine after this January 2003 snapshot.  Unarmed,\n// the AI could not shoot, and because MoveToEnemy() is gated on HasAnyWeapon()\n// it could not even advance: it ended every turn without acting.\n//\n// platform/a5_loadout.cpp captures those tables; this turns a pick into items.\n// Only ever fills an EMPTY weapon slot, so anything the older WeaponID path\n// already equipped is left exactly as it was.\nvoid CUnit::EquipFromLoadout( int nLevel, int nSeed )\n{\n\tif ( !IsValid( pPers ) || !IsValid( pInventory ) )\n\t\treturn;\n\tif ( IsValid( pInventory->Get( NDb::SLOT_1 ) ) )\n\t\treturn;                       // already armed the old way\n\tif ( !a5_loadout_available() )\n\t\treturn;                       // game.db predates the loadout tables\n\tSA5LoadoutItem picked[ 24 ];\n\tconst int nPicked = a5_loadout_pick( pPers->GetRecordID(), nLevel, nSeed, picked, 24 );\n\tint nEquipped = 0, nStowed = 0;\n\tfor ( int i = 0; i < nPicked; ++i )\n\t{\n\t\tNDb::CRPGItem *pDBItem = NDb::GetRPGItem( picked[ i ].nItemID );\n\t\tif ( !IsValid( pDBItem ) || !IsValid( pDBItem->pSuccessor ) )\n\t\t\tcontinue;                 // the item exists but has no weapon/clip/... behind it\n\t\tfor ( int k = 0; k < picked[ i ].nCount; ++k )\n\t\t{\n\t\t\tCPtr<IInventoryItem> pItem = CreateItem( pDBItem->pSuccessor.GetPtr() );\n\t\t\tif ( !IsValid( pItem ) )\n\t\t\t\tcontinue;\n\t\t\tconst bool bFireArm = ( dynamic_cast<IWeaponItemInfo*>( pItem.GetPtr() ) != 0 );\n\t\t\tif ( bFireArm && !IsValid( pInventory->Get( NDb::SLOT_1 ) ) &&\n\t\t\t     pInventory->Equip( NDb::SLOT_1, pItem ) )\n\t\t\t\t++nEquipped;\n\t\t\telse\n\t\t\t{\n\t\t\t\tpInventory->Place( CTPoint<int>( -1, -1 ), pItem );\n\t\t\t\t++nStowed;\n\t\t\t}\n\t\t}\n\t}\n\tif ( nEquipped || nStowed )\n\t\tcsSystem << "LOADOUT: " << pPers->szUserName.c_str() << " lvl " << nLevel\n\t\t         << " -> " << nEquipped << " equipped, " << nStowed << " stowed" << endl;\n}\n////////////////////////////////////////////////////////////////////////////////////////////////////\nconst u16string& CUnit::GetName() const\n',
+    ),
+    (
+        "Main/wMain.cpp",
+        'Arm mission enemies from the retail loadout templates, right after their level is set (the band the pick draws from depends on it).  Inside the non-Panzerklein branch: a PK pilot is equipped by its Panzerklein, not from an infantry template.',
+        '\t\t\tpRPG->GetRPGUnit()->SetXPLevel( nLevel );\n\t\t\tpRPG->SetDiplomacy( i->nDiplomacy );\n',
+        '\t\t\tpRPG->GetRPGUnit()->SetXPLevel( nLevel );\n\t\t\tpRPG->SetDiplomacy( i->nDiplomacy );\n\t\t\t// [macos] Arm the unit now that its level is known -- generic enemy\n\t\t\t// templates carry no WeaponID on retail data.  nUnitToCreate seeds the\n\t\t\t// pick so a squad is varied but a reloaded save re-arms identically.\n\t\t\tpRPG->GetRPGUnit()->EquipFromLoadout( nLevel, nUnitToCreate );\n',
+    ),
+]
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)

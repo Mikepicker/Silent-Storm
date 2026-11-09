@@ -35,6 +35,7 @@
 #include "FileIO/BasicChunk1.h"
 #include "DBFormat/DataMap.h"
 #include "a5_log.h"
+#include "a5_loadout.h"
 
 #include <map>
 
@@ -471,6 +472,193 @@ CDBRecord* CDBTableBase::GetDBRecord( int nID )
     return i == records.end() ? 0 : i->second.GetPtr();
 }
 
+/* ========================================================================== */
+/*  Enemy loadout templates -- see a5_loadout.h for the chain and why it is    */
+/*  captured here rather than imported as records.                             */
+/* ========================================================================== */
+namespace {
+struct SLoadoutBundle { int nChestID; float fWeight; int nLevel; };
+struct SChestEntry    { int nItemID; int nQuantity; int nMaxQuantity; };
+struct SPersTemplates { int nInHand, nInBackpack; };
+
+const int TBL_TEMPLATES = 0x6A;   /* id -> UserName ("handRifles", ...)        */
+const int TBL_BUNDLES   = 0x6C;   /* id(=ChestID), TemplateID, RndWeight, Level */
+const int TBL_CHESTS    = 0x6B;   /* ChestID -> RPGItemID, Quantity, MaxQuantity*/
+const int TBL_PERS      = 0xE0000004;
+
+std::map< int, std::vector< SLoadoutBundle > > g_bundlesByTemplate;
+std::map< int, std::vector< SChestEntry > >    g_entriesByChest;
+std::map< int, SPersTemplates >                g_templatesByPers;
+
+CRetailTable *FindRaw( int nTableID )
+{
+    hash_map< int, CObj< CObjectBase > >::iterator it = retailTables.find( nTableID );
+    return it != retailTables.end() ? dynamic_cast< CRetailTable * >( it->second.GetPtr() ) : 0;
+}
+
+void CaptureLoadoutTables()
+{
+    g_bundlesByTemplate.clear();
+    g_entriesByChest.clear();
+    g_templatesByPers.clear();
+
+    SCursor cur;
+    if ( CRetailTable *pT = FindRaw( TBL_BUNDLES ) )
+    {
+        cur.Open( pT );
+        for ( cur.MoveFirst(); !cur.IsEof(); cur.MoveNext() )
+        {
+            SLoadoutBundle b;
+            b.nChestID = cur.GetInt( "ID" );
+            b.fWeight  = cur.GetFloat( "RndWeight" );
+            b.nLevel   = cur.GetInt( "Level" );
+            if ( b.fWeight <= 0 ) b.fWeight = 1.0f;
+            g_bundlesByTemplate[ cur.GetInt( "TemplateID" ) ].push_back( b );
+        }
+    }
+    if ( CRetailTable *pT = FindRaw( TBL_CHESTS ) )
+    {
+        cur.Open( pT );
+        for ( cur.MoveFirst(); !cur.IsEof(); cur.MoveNext() )
+        {
+            SChestEntry e;
+            e.nItemID       = cur.GetInt( "RPGItemID" );
+            e.nQuantity     = cur.GetInt( "Quantity" );
+            e.nMaxQuantity  = cur.GetInt( "MaxQuantity" );
+            if ( e.nItemID > 0 )
+                g_entriesByChest[ cur.GetInt( "ChestID" ) ].push_back( e );
+        }
+    }
+    if ( CRetailTable *pT = FindRaw( TBL_PERS ) )
+    {
+        cur.Open( pT );
+        for ( cur.MoveFirst(); !cur.IsEof(); cur.MoveNext() )
+        {
+            SPersTemplates t;
+            t.nInHand     = cur.GetInt( "WeaponInHand" );
+            t.nInBackpack = cur.GetInt( "WeaponInBackpack" );
+            if ( t.nInHand > 0 || t.nInBackpack > 0 )
+                g_templatesByPers[ cur.GetInt( "ID" ) ] = t;
+        }
+    }
+    int nTemplates = 0;
+    if ( CRetailTable *pT = FindRaw( TBL_TEMPLATES ) ) nTemplates = pT->RowCount();
+    a5_log( A5_PRIORITY_INFO,
+            "game.db: loadouts captured -- %d templates, %d with bundles, %d chests, %d persons",
+            nTemplates, (int)g_bundlesByTemplate.size(), (int)g_entriesByChest.size(),
+            (int)g_templatesByPers.size() );
+    if ( getenv( "A5_LOADOUT_TEST" ) )
+    {
+        for ( std::map< int, SPersTemplates >::const_iterator p = g_templatesByPers.begin();
+              p != g_templatesByPers.end(); ++p )
+        {
+            for ( int nLvl = 1; nLvl <= 12; nLvl += 11 )
+            {
+                SA5LoadoutItem items[ 16 ];
+                int n = a5_loadout_pick( p->first, nLvl, 1234, items, 16 );
+                std::string szList;
+                for ( int i = 0; i < n; ++i )
+                {
+                    char buf[ 64 ];
+                    snprintf( buf, sizeof( buf ), "item%d x%d ", items[ i ].nItemID, items[ i ].nCount );
+                    szList += buf;
+                }
+                a5_log( A5_PRIORITY_INFO, "loadout-test: pers=%d lvl=%d hand=%d pack=%d -> %s",
+                        p->first, nLvl, p->second.nInHand, p->second.nInBackpack,
+                        n ? szList.c_str() : "<nothing>" );
+            }
+        }
+    }
+}
+
+/*  Highest level band at or below nLevel; weighted pick among that band.
+ *  Falls back to the lowest band when the unit is below every entry.        */
+const SLoadoutBundle *PickBundle( int nTemplateID, int nLevel, unsigned nSeed )
+{
+    std::map< int, std::vector< SLoadoutBundle > >::const_iterator it =
+        g_bundlesByTemplate.find( nTemplateID );
+    if ( it == g_bundlesByTemplate.end() || it->second.empty() )
+        return 0;
+    const std::vector< SLoadoutBundle > &all = it->second;
+    int nBand = -1;
+    for ( size_t i = 0; i < all.size(); ++i )
+        if ( all[ i ].nLevel <= nLevel && all[ i ].nLevel > nBand )
+            nBand = all[ i ].nLevel;
+    if ( nBand < 0 )
+    {
+        nBand = all[ 0 ].nLevel;
+        for ( size_t i = 1; i < all.size(); ++i )
+            if ( all[ i ].nLevel < nBand ) nBand = all[ i ].nLevel;
+    }
+    float fTotal = 0;
+    for ( size_t i = 0; i < all.size(); ++i )
+        if ( all[ i ].nLevel == nBand ) fTotal += all[ i ].fWeight;
+    if ( fTotal <= 0 )
+        return 0;
+    /*  A cheap deterministic hash so a reloaded save re-arms identically.   */
+    unsigned h = nSeed * 1664525u + 1013904223u;
+    h ^= h >> 16;
+    float fPick = ( h % 100000u ) / 100000.0f * fTotal;
+    for ( size_t i = 0; i < all.size(); ++i )
+    {
+        if ( all[ i ].nLevel != nBand ) continue;
+        fPick -= all[ i ].fWeight;
+        if ( fPick <= 0 ) return &all[ i ];
+    }
+    for ( size_t i = 0; i < all.size(); ++i )
+        if ( all[ i ].nLevel == nBand ) return &all[ i ];
+    return 0;
+}
+
+int EmitChest( int nChestID, unsigned nSeed, SA5LoadoutItem *pOut, int nMax, int nAt )
+{
+    std::map< int, std::vector< SChestEntry > >::const_iterator it =
+        g_entriesByChest.find( nChestID );
+    if ( it == g_entriesByChest.end() )
+        return nAt;
+    for ( size_t i = 0; i < it->second.size() && nAt < nMax; ++i )
+    {
+        const SChestEntry &e = it->second[ i ];
+        int nLo = e.nQuantity, nHi = e.nMaxQuantity > nLo ? e.nMaxQuantity : nLo;
+        int nCount = nLo;
+        if ( nHi > nLo )
+        {
+            unsigned h = ( nSeed + (unsigned)i * 2654435761u ) * 1103515245u + 12345u;
+            nCount = nLo + (int)( ( h >> 16 ) % (unsigned)( nHi - nLo + 1 ) );
+        }
+        if ( nCount <= 0 )
+            continue;
+        pOut[ nAt ].nItemID = e.nItemID;
+        pOut[ nAt ].nCount  = nCount;
+        ++nAt;
+    }
+    return nAt;
+}
+}   /* anonymous namespace */
+
+bool a5_loadout_available()
+{
+    return !g_bundlesByTemplate.empty() && !g_entriesByChest.empty() && !g_templatesByPers.empty();
+}
+
+int a5_loadout_pick( int nPersID, int nLevel, int nSeed, SA5LoadoutItem *pOut, int nMax )
+{
+    std::map< int, SPersTemplates >::const_iterator it = g_templatesByPers.find( nPersID );
+    if ( it == g_templatesByPers.end() || !pOut || nMax <= 0 )
+        return 0;
+    int nAt = 0;
+    const int anTemplates[ 2 ] = { it->second.nInHand, it->second.nInBackpack };
+    for ( int t = 0; t < 2; ++t )
+    {
+        if ( anTemplates[ t ] <= 0 )
+            continue;
+        unsigned nMix = (unsigned)nSeed * 31u + (unsigned)nPersID * 7u + (unsigned)t;
+        if ( const SLoadoutBundle *pB = PickBundle( anTemplates[ t ], nLevel, nMix ) )
+            nAt = EmitChest( pB->nChestID, nMix, pOut, nMax, nAt );
+    }
+    return nAt;
+}
+
 void NDatabase::Serialize( CDataStream &file, CStructureSaver::EMode mode )
 {
     if ( mode != CStructureSaver::READ )
@@ -484,6 +672,7 @@ void NDatabase::Serialize( CDataStream &file, CStructureSaver::EMode mode )
         CStructureSaver f( file, mode );
         f.Add( 1, &retailTables );
     }
+    CaptureLoadoutTables();   /* before Import(): needs the raw tables */
     Import();
     /*  The shipping game builds the cross-record links right after importing
      *  (Soft/Andy/May03/Main.cpp: NDatabase::Import( true ) then
