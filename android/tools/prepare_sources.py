@@ -4826,18 +4826,6 @@ RULES += [
         'pLSAnimator->Process( &(value.mesh[nVert].x), 3, pMesh->nVertices[i] );',
     ),
     (
-        'Main/iUnitPanel.cpp',
-        'Retail push-button templates already draw the localized turn caption; omit the old baked-text image.',
-        '\t\t\tpEndOfTurn->AddImageState( 0, NDb::GetUITexture( 379 ) );',
-        '\t\t\t// Caption is supplied by the retail CPushButton template.',
-    ),
-    (
-        'Main/iUnitPanel.cpp',
-        'Retail push-button templates already draw the localized turn caption; omit the old baked-text image.',
-        '\t\t\tpStartOfTurn->AddImageState( 0, NDb::GetUITexture( 469 ) );',
-        '\t\t\t// Caption is supplied by the retail CPushButton template.',
-    ),
-    (
         'Main/iUnitPanel.h',
         'Track the retail empty-selection HUD backdrop.',
         '\tCPtr<CImage> pBackgroundMultipleUnits;',
