@@ -5677,6 +5677,16 @@ RULES += [
     ),
 ]
 
+
+RULES += [
+    (
+        "Main/wTurnBased.h",
+        'INFINITE RECURSION when a unit dies from damage-over-time at the start of a turn.  CTBSWorld::StartPlayerTurn dispatched the turn-start event before pushing the turn\'s SInterrupt, so CUnitServer::Die -> MakeUnitInactive saw an empty `interrupts` list -- its signal that nobody is left to act -- and called StartNextPlayerTurn() from inside the dispatch.  That re-threw the event, re-applied the damage and recursed: StartPlayerTurn -> OnNewPlayerTurn -> ThrowEvent -> ProcessAttack -> KillUnit -> Die -> MakeUnitInactive -> StartPlayerTurn, 9855 levels deep before the stack guard caught it.  Latent until enemies could actually wound anyone, which is why it only appeared once the loadout fix let them shoot back.  Push the interrupt and set nTurnPlayerID first.',
+        '\tvoid StartPlayerTurn( TPlayer *pPlayer )\n\t{\n\t\tif ( IsForcedRealTime() )\n\t\t\treturn;\n\t\tif ( !IsValid( pPlayer ) )\n\t\t\treturn;\n\t\tpPlayer->OnTBSEvent( TBS_START_NEW_TURN );\n\t\tOnNewPlayerTurn( pPlayer );\n\t\tinterrupts.push_back( SInterrupt( pPlayer ) );\n\t\tOnPassControl();\n\t\tnTurnPlayerID = pPlayer->GetPlayerID();\n \t}\n',
+        '\tvoid StartPlayerTurn( TPlayer *pPlayer )\n\t{\n\t\tif ( IsForcedRealTime() )\n\t\t\treturn;\n\t\tif ( !IsValid( pPlayer ) )\n\t\t\treturn;\n\t\t// [macos] Register the turn BEFORE anything can react to it.  Upstream\n\t\t// dispatched TBS_START_NEW_TURN and OnNewPlayerTurn() first and pushed\n\t\t// the interrupt afterwards, so a unit that died while that event was\n\t\t// being handled -- bleeding out from a wound at the start of its turn --\n\t\t// reached MakeUnitInactive() with `interrupts` still EMPTY.  That is its\n\t\t// "nobody left to act" condition, so it called StartNextPlayerTurn(),\n\t\t// which dispatched the same event again, killed the same unit again, and\n\t\t// recursed until the stack ran out (observed at 9855 levels).  Worse,\n\t\t// nTurnPlayerID was only assigned at the end, so every nested advance\n\t\t// picked the SAME next player.  Establishing both up front makes the\n\t\t// death see a live turn, and makes a genuine advance (a player whose\n\t\t// last unit dies on turn start) move on to the following player once\n\t\t// instead of looping.  OnPassControl() stays last so it hands control to\n\t\t// whichever turn is current by then.\n\t\tinterrupts.push_back( SInterrupt( pPlayer ) );\n\t\tnTurnPlayerID = pPlayer->GetPlayerID();\n\t\tpPlayer->OnTBSEvent( TBS_START_NEW_TURN );\n\t\tOnNewPlayerTurn( pPlayer );\n\t\tOnPassControl();\n \t}\n',
+    ),
+]
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
