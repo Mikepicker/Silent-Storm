@@ -5639,6 +5639,16 @@ RULES += [
     ),
 ]
 
+
+RULES += [
+    (
+        "Main/iTopPanel.cpp",
+        'The retail topbar carries an `objectives` button that this engine revision cannot serve: there is no objectives screen class in the January 2003 source (33 CIC* interface commands, none for objectives), and the script functions that would fill one -- ScenarioAddGoal, ScenarioSetGoalComplete, ScenarioSetTaskComplete -- were added to the engine after this snapshot too, so the port stubs them to stop retail mission scripts aborting on a nil call.  Disable the button the way minimap already is, so it reads as unavailable instead of broken.',
+        '\t\t\tpMiniMap = GetUIWindow<CButton>( this, "minimap" );\n\t\t\tpMiniMap->AddImageState( 0, NDb::GetUITexture( 468 ) );\n\t\t\tpMiniMap->SetStyle( STYLE_ENABLED, false );\n',
+        '\t\t\tpMiniMap = GetUIWindow<CButton>( this, "minimap" );\n\t\t\tpMiniMap->AddImageState( 0, NDb::GetUITexture( 468 ) );\n\t\t\tpMiniMap->SetStyle( STYLE_ENABLED, false );\n\n\t\t\t// [macos] The retail topbar also carries an `objectives` button (it sits\n\t\t\t// at x=757, between endmission and clues).  This January 2003 revision\n\t\t\t// has no objectives screen to open: there is no CIC* interface command\n\t\t\t// for one among the 33 this source defines, and the script API that\n\t\t\t// would populate it -- ScenarioAddGoal, ScenarioSetGoalComplete,\n\t\t\t// ScenarioSetTaskComplete -- does not exist here either, so the port\n\t\t\t// stubs those to keep retail mission scripts from aborting.  Grey it\n\t\t\t// out, exactly as minimap above is, rather than leave a live-looking\n\t\t\t// button that silently does nothing.  `clues` (labelled "Journal") is\n\t\t\t// wired in ProcessMessage and does work.\n\t\t\t{\n\t\t\t\tCButton *pObjectives = GetUIWindow<CButton>( this, "objectives" );\n\t\t\t\tif ( pObjectives )\n\t\t\t\t\tpObjectives->SetStyle( STYLE_ENABLED, false );\n\t\t\t}\n',
+    ),
+]
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
