@@ -352,7 +352,32 @@ int main( int argc, char **argv )
                 case SDL_MOUSEWHEEL:
 #ifdef A5_HAVE_MAIN
                     if ( bShowGame )
+                    {
+                        /*  Two-finger trackpad panning.  macOS delivers a two-finger
+                         *  swipe as a stream of wheel events with fractional precise
+                         *  deltas (a real wheel notch arrives as +/-1.0), and the
+                         *  engine already knows how to pan from a gesture: the Android
+                         *  build feeds A5CameraMotion.panX/panY -- fractions of the
+                         *  viewport height -- and CCamera::Update applies them against
+                         *  the visible span.  Nothing fed it on macOS, so the camera
+                         *  could only be moved by pushing the pointer into a screen
+                         *  edge.  Signs follow the map-under-the-fingers convention.
+                         *  A5_TRACKPAD_PAN=0 disables it for mouse-only setups.  */
+                        static const float fPanScale = []{
+                            const char *pszEnv = getenv( "A5_TRACKPAD_PAN" );
+                            return pszEnv ? (float)atof( pszEnv ) : 0.02f;
+                        }();
+                        if ( fPanScale != 0.0f &&
+                             ( ev.wheel.preciseX != 0.0f || ev.wheel.preciseY != 0.0f ) )
+                        {
+                            A5CameraMotion motion;
+                            motion.panX = -ev.wheel.preciseX * fPanScale;
+                            motion.panY = -ev.wheel.preciseY * fPanScale;
+                            a5_input_camera_motion( &motion );
+                        }
+                        /*  Still report the notch so UI lists keep scrolling.  */
                         a5_input_wheel( ev.wheel.y * 120 );
+                    }
                     else
 #endif
                     if ( bConsole )
