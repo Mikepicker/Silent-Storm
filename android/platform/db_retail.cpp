@@ -326,7 +326,7 @@ void NDatabase::Import()
         for ( size_t i = 0; i < descrs.size(); ++i )
             if ( descrs[ i ].nTableID == it->first ) bKnown = true;
         if ( !bKnown ) ++nUnknown;
-        if ( !bKnown && getenv( "A5_DB_DUMP" ) )
+        if ( getenv( "A5_DB_DUMP_ALL" ) || ( !bKnown && getenv( "A5_DB_DUMP" ) ) )
         {
             CRetailTable *pRT = dynamic_cast< CRetailTable * >( it->second.GetPtr() );
             std::string szCols;
@@ -336,7 +336,35 @@ void NDatabase::Import()
                 szCols += pRT->columns[ c ].szName;
                 szCols += "ibfs"[ pRT->columns[ c ].nType & 3 ];
             }
-            a5_log( A5_PRIORITY_INFO, "game.db: unknown table 0x%X: %d rows, cols %s", it->first, pRT ? pRT->RowCount() : -1, szCols.c_str() );
+            a5_log( A5_PRIORITY_INFO, "game.db: %stable 0x%X: %d rows, cols %s", bKnown ? "" : "unknown ", it->first, pRT ? pRT->RowCount() : -1, szCols.c_str() );
+        }
+    }
+    // [macos] A5_DB_ROWS=<hex table id> dumps that table's rows, for working out
+    // what a column in a table this source does not know actually references.
+    if ( const char *pszRows = getenv( "A5_DB_ROWS" ) )
+    {
+        int nWanted = (int)strtoul( pszRows, 0, 16 );
+        hash_map< int, CObj< CObjectBase > >::iterator itR = retailTables.find( nWanted );
+        CRetailTable *pRT = itR != retailTables.end() ? dynamic_cast< CRetailTable * >( itR->second.GetPtr() ) : 0;
+        if ( !pRT )
+            a5_log( A5_PRIORITY_INFO, "game.db: A5_DB_ROWS table 0x%X not present", nWanted );
+        else
+        {
+            SCursor cur;
+            cur.Open( pRT );
+            for ( cur.MoveFirst(); !cur.IsEof(); cur.MoveNext() )
+            {
+                std::string szRow;
+                for ( size_t c = 0; c < pRT->intNames.size(); ++c )
+                {
+                    char buf[ 64 ];
+                    snprintf( buf, sizeof( buf ), "%s=%d ", pRT->intNames[ c ].c_str(), cur.GetInt( pRT->intNames[ c ].c_str() ) );
+                    szRow += buf;
+                }
+                for ( size_t c = 0; c < pRT->stringNames.size(); ++c )
+                    szRow += pRT->stringNames[ c ] + "='" + SCursor::Narrow( cur.GetString( pRT->stringNames[ c ].c_str() ) ) + "' ";
+                a5_log( A5_PRIORITY_INFO, "game.db: ROW 0x%X: %s", nWanted, szRow.c_str() );
+            }
         }
     }
     a5_log( A5_PRIORITY_INFO, "game.db: retail format, %d/%d tables matched DBFormat (%d records imported, %d tables in the file unknown to this source, %d missing-column warnings)",
