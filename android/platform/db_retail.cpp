@@ -34,6 +34,10 @@
 #include "Misc/BasicFactory.h"
 #include "FileIO/BasicChunk1.h"
 #include "DBFormat/DataMap.h"
+#include "DBFormat/DataFormat.h"
+#include "DBFormat/DataGeometry.h"
+#include "DBFormat/DataAnimation.h"
+#include "DBFormat/DataRPG.h"
 #include "a5_log.h"
 #include "a5_loadout.h"
 #include "Main/GGeometry.h"
@@ -42,6 +46,8 @@
 #include "Main/GAnimFormat.h"   /* SBone             */
 #include "head_neutral.h"      /* A5Head::Load      */
 #include <cstdio>
+
+static void DumpUnitManifest( const char *pszWanted, const char *pszOut );
 
 #include <map>
 
@@ -376,6 +382,154 @@ void NDatabase::Import()
     }
     a5_log( A5_PRIORITY_INFO, "game.db: retail format, %d/%d tables matched DBFormat (%d records imported, %d tables in the file unknown to this source, %d missing-column warnings)",
             nTablesMatched, (int)descrs.size(), nRecords, nUnknown, nMissingColumnWarnings );
+    if ( const char *pszUnit = getenv( "A5_EXPORT_UNIT" ) )
+    {
+        /*  A comma separated list writes one file per name, <out>.<name>.txt,
+         *  so a search across characters costs one database load, not one
+         *  per character.  */
+        std::string szList = pszUnit;
+        const char *pszOut = getenv( "A5_EXPORT_OUT" );
+        size_t nAt = 0;
+        const bool bMany = szList.find( ',' ) != std::string::npos;
+        while ( nAt <= szList.size() )
+        {
+            size_t nEnd = szList.find( ',', nAt );
+            if ( nEnd == std::string::npos ) nEnd = szList.size();
+            std::string szOne = szList.substr( nAt, nEnd - nAt );
+            if ( !szOne.empty() )
+            {
+                std::string szOut = pszOut ? pszOut : "/tmp/ss_unit.txt";
+                if ( bMany ) szOut += "." + szOne + ".txt";
+                DumpUnitManifest( szOne.c_str(), szOut.c_str() );
+            }
+            nAt = nEnd + 1;
+        }
+    }
+}
+
+/* ==========================================================================
+ *  Unit manifest.  Everything a character is made of lives behind five
+ *  levels of database pointer, and the exporters downstream only want the
+ *  resource ids, so resolve it once here and write it out as a flat list:
+ *
+ *      body <geometry> <skeleton> <tex0..3>
+ *      head <head record> <texture>
+ *      gear <bone> <geometry> <tex0..3>
+ *
+ *  Where a character gets its gear is CRPGUniform plus the active weapon:
+ *  GetItemsBindPlaces attaches the uniform's cap and backpack models, then
+ *  whatever fixed model each of the nine belt places carries, then the
+ *  weapon -- in the hand on bone "Item", or slung on a bone named after the
+ *  weapon type when it is SUBTYPE_HEAVY.  pszItemEffectors maps the belt
+ *  places onto Slot1..Slot9, in an order that is not the obvious one.      */
+/*  "<texture id>:<CMaterial::EAlpha>" -- the alpha mode decides whether the
+ *  texture's alpha is a cutout, a blend or ignored, and a DXT1 texture that
+ *  is entirely alpha 0 (a rank patch this uniform does not wear) looks like a
+ *  black rectangle without it.                                              */
+static std::string TextureOf( NDb::CMaterial *pMaterial )
+{
+    char buf[ 32 ];
+    const int nTex = pMaterial && IsValid( pMaterial->pTexture ) ? pMaterial->pTexture->GetRecordID() : 0;
+    snprintf( buf, sizeof( buf ), "%d:%d", nTex, pMaterial ? (int)pMaterial->alpha : 0 );
+    return buf;
+}
+
+static void EmitModel( FILE *pf, const char *pszKind, const char *pszBone, NDb::CTRndModel *pTemplate )
+{
+    if ( !IsValid( pTemplate ) )
+        return;
+    SRand rnd;
+    NDb::CModel *pModel = pTemplate->CreateModel( &rnd );
+    if ( !pModel || !IsValid( pModel->pGeometry ) )
+        return;
+    fprintf( pf, "%s", pszKind );
+    if ( pszBone )
+        fprintf( pf, " %s", pszBone );
+    fprintf( pf, " %d %d", pModel->pGeometry->GetRecordID(),
+             IsValid( pModel->pSkeleton ) ? pModel->pSkeleton->GetRecordID() : 0 );
+    for ( int i = 0; i < NDb::N_MODEL_MATERIALS; ++i )
+        fprintf( pf, " %s", TextureOf( pModel->pMaterials[ i ].GetPtr() ).c_str() );
+    fprintf( pf, "\n" );
+}
+
+static void DumpUnitManifest( const char *pszWanted, const char *pszOut )
+{
+    /*  pszWanted is a UserName, or a decimal RPGPers id. */
+    NDb::CRPGPers *pPers = 0;
+    const int nByID = atoi( pszWanted );
+    for ( int i = 0; i < 20000 && !pPers; ++i )
+    {
+        NDb::CRPGPers *p = NDb::GetPers( i );
+        if ( !p )
+            continue;
+        if ( ( nByID > 0 && p->GetRecordID() == nByID ) || p->szUserName == pszWanted )
+            pPers = p;
+    }
+    if ( !pPers )
+    {
+        a5_log( A5_PRIORITY_ERROR, "export: no RPGPers called '%s'", pszWanted );
+        return;
+    }
+    FILE *pf = fopen( pszOut ? pszOut : "/tmp/ss_unit.txt", "w" );
+    if ( !pf )
+        return;
+    fprintf( pf, "# %s (RPGPers %d)%s\n", pPers->szUserName.c_str(), pPers->GetRecordID(),
+             pPers->bIsFemale ? " female" : "" );
+    fprintf( pf, "name %s\n", pPers->szUserName.c_str() );
+
+    EmitModel( pf, "body", 0, pPers->pModel.GetPtr() );
+
+    if ( IsValid( pPers->pHead ) && IsValid( pPers->pHead->pHead ) )
+    {
+        NDb::CHead *pHead = pPers->pHead->pHead;
+        SRand rnd;
+        NDb::CMaterial *pMat = IsValid( pHead->pMaterial ) ? pHead->pMaterial->GetMaterial( &rnd ) : 0;
+        fprintf( pf, "head %d %s\n", pHead->GetRecordID(), TextureOf( pMat ).c_str() );
+        /*  Hair and the extra head meshes are placed by CreateLSHead with the
+         *  bare head-bone transform, not the scaled one the LifeStudio mesh
+         *  gets, so they belong on "Head" unscaled.  A unit wearing a cap uses
+         *  pHairInCap where there is one.  */
+        NDb::CComplexHead *pCH = pPers->pHead;
+        const bool bHasCap = IsValid( pPers->pUniform ) && IsValid( pPers->pUniform->pCapModel );
+        NDb::CTRndModel *pHair = ( bHasCap && IsValid( pCH->pHairInCap ) )
+                                 ? pCH->pHairInCap.GetPtr() : pCH->pHair.GetPtr();
+        EmitModel( pf, "gear", "Head", pHair );
+        for ( int i = 0; i < NDb::N_HEAD_MESHES; ++i )
+            EmitModel( pf, "gear", "Head", pCH->pMeshes[ i ].GetPtr() );
+    }
+
+    if ( IsValid( pPers->pUniform ) )
+    {
+        NDb::CRPGUniform *pU = pPers->pUniform;
+        EmitModel( pf, "gear", "Cap", pU->pCapModel.GetPtr() );
+        EmitModel( pf, "gear", "BackPack", pU->pBackpackModel.GetPtr() );
+        /*  pszItemEffectors, for the nine NDb::N_ITEM_PLACES in order.  */
+        static const char * const pszBeltBones[ 9 ] =
+            { "Slot5", "Slot3", "Slot4", "Slot9", "Slot6", "Slot8", "Slot7", "Slot2", "Slot1" };
+        for ( int i = 0; i < (int)pU->fixedModels.size() && i < 9; ++i )
+            EmitModel( pf, "gear", pszBeltBones[ i ], pU->fixedModels[ i ].GetPtr() );
+    }
+
+    if ( IsValid( pPers->pWeapon ) && IsValid( pPers->pWeapon->pItem ) )
+    {
+        NDb::CRPGItem *pItem = pPers->pWeapon->pItem;
+        const char *pszBone = "Item";
+        if ( pItem->subType == NDb::SUBTYPE_HEAVY && IsValid( pPers->pWeapon->pAnimWeaponType ) )
+        {
+            switch ( pPers->pWeapon->pAnimWeaponType->type )
+            {
+                case NDb::WT_RIFLE:           pszBone = "Rifle";          break;
+                case NDb::WT_SUB_MACHINE_GUN: pszBone = "SubMachineGun";  break;
+                case NDb::WT_MACHINE_GUN:     pszBone = "MachineGun";     break;
+                case NDb::WT_RLAUNCHER:       pszBone = "RocketLauncher"; break;
+                default:                      pszBone = "Item";           break;
+            }
+        }
+        EmitModel( pf, "gear", pszBone, pItem->pModel.GetPtr() );
+    }
+    fclose( pf );
+    a5_log( A5_PRIORITY_INFO, "export: unit '%s' -> %s", pPers->szUserName.c_str(),
+            pszOut ? pszOut : "/tmp/ss_unit.txt" );
 }
 
 /* ---- field access from the record classes' Import() ----------------------- */

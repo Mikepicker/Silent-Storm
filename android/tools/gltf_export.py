@@ -117,6 +117,15 @@ def bone_world(bones):
         w(i)
     return out
 
+def bone_index_of(bones, name):
+    for i, bo in enumerate(bones):
+        if bo["name"] == name:
+            return i
+    raise SystemExit("no bone called %r in this skeleton" % name)
+
+def transform(pos, M):
+    return [[M[r][0]*p[0] + M[r][1]*p[1] + M[r][2]*p[2] + M[r][3] for r in range(3)] for p in pos]
+
 def read_head_obj(path):
     """The head dump has positions, UVs and polygons but no normals."""
     pos, uv, polys = [], [], []
@@ -164,7 +173,17 @@ def head_to_bone_space(pos, W):
         out.append([W[r][0]*v[0] + W[r][1]*v[1] + W[r][2]*v[2] + W[r][3] for r in range(3)])
     return out
 
-def build(parts, bones, binds, out_gltf, head=None):
+def material(name, texture_index, alpha_mode):
+    m = {"name": name, "pbrMetallicRoughness": {
+             "baseColorTexture": {"index": texture_index},
+             "metallicFactor": 0.0, "roughnessFactor": 0.9}}
+    if alpha_mode == "MASK":
+        m["alphaMode"] = "MASK"; m["alphaCutoff"] = 0.5; m["doubleSided"] = True
+    elif alpha_mode == "BLEND":
+        m["alphaMode"] = "BLEND"; m["doubleSided"] = True
+    return m
+
+def build(parts, bones, binds, out_gltf, head=None, gear=()):
     base = os.path.splitext(os.path.basename(out_gltf))[0]
     bin_name = base + ".bin"
     b = Buf()
@@ -172,7 +191,7 @@ def build(parts, bones, binds, out_gltf, head=None):
     meshes, materials, images, textures = [], [], [], []
 
     prims, groups = [], []
-    for name, obj, wts, png in parts:
+    for name, obj, wts, png, amode in parts:
         pos, nrm, uv, idx = read_obj(obj)
         J, W = read_weights(wts, len(pos), njoints)
         vp = b.add(struct.pack('<%df' % (len(pos)*3), *[c for p in pos for c in p]), 34962)
@@ -191,15 +210,13 @@ def build(parts, bones, binds, out_gltf, head=None):
         a_i   = b.acc(vi, 5125, len(idx), "SCALAR")
         images.append({"uri": os.path.basename(png)})
         textures.append({"source": len(images) - 1})
-        materials.append({"name": name, "pbrMetallicRoughness": {
-            "baseColorTexture": {"index": len(textures) - 1},
-            "metallicFactor": 0.0, "roughnessFactor": 0.9}})
+        materials.append(material(name, len(textures) - 1, amode))
         prims.append({"attributes": {"POSITION": a_pos, "NORMAL": a_nrm,
                                      "TEXCOORD_0": a_uv, "JOINTS_0": a_j, "WEIGHTS_0": a_w},
                       "indices": a_i, "material": len(materials) - 1})
         groups.append((name, pos, nrm, uv, idx, png))
     if head:
-        head_obj, head_png, head_bone = head
+        head_obj, head_png, head_bone, head_alpha = head
         bone_index = next(i for i, bo in enumerate(bones) if bo["name"] == head_bone)
         if bone_index >= njoints:
             raise SystemExit("head bone %r is not a skinned joint" % head_bone)
@@ -218,9 +235,7 @@ def build(parts, bones, binds, out_gltf, head=None):
         mx = [max(p[i] for p in hpos) for i in range(3)]
         images.append({"uri": os.path.basename(head_png)})
         textures.append({"source": len(images) - 1})
-        materials.append({"name": "Head", "pbrMetallicRoughness": {
-            "baseColorTexture": {"index": len(textures) - 1},
-            "metallicFactor": 0.0, "roughnessFactor": 0.9}})
+        materials.append(material("Head", len(textures) - 1, head_alpha))
         prims.append({"attributes": {
                           "POSITION":   b.acc(vp, 5126, len(hpos), "VEC3", mn, mx),
                           "NORMAL":     b.acc(vn, 5126, len(hnrm), "VEC3"),
@@ -231,6 +246,37 @@ def build(parts, bones, binds, out_gltf, head=None):
                       "material": len(materials) - 1})
         groups.append(("Head", hpos, hnrm, huv, hidx, head_png))
     meshes.append({"name": base, "primitives": prims})
+
+    #  Equipment is not skinned.  CSetRender::AddMesh draws each bound mesh
+    #  with CreateMesh under a CAddBoneFilter, so its vertices are already in
+    #  the bone's own space; in glTF that is a plain mesh node parented to the
+    #  bone's node, which also works for the sockets that carry no weights and
+    #  so are not joints of the skin.
+    gear_nodes = []
+    for name, bone, gparts in gear:
+        gprims = []
+        for pname, obj, png, amode in gparts:
+            pos, nrm, uv, idx = read_obj(obj)
+            if not nrm:
+                nrm = face_normals(pos, idx)
+            vp = b.add(struct.pack('<%df' % (len(pos)*3), *[c for p in pos for c in p]), 34962)
+            vn = b.add(struct.pack('<%df' % (len(nrm)*3), *[c for p in nrm for c in p]), 34962)
+            vt = b.add(struct.pack('<%df' % (len(uv)*2),  *[c for p in uv  for c in p]), 34962)
+            vi = b.add(struct.pack('<%dI' % len(idx), *idx), 34963)
+            mn = [min(p[i] for p in pos) for i in range(3)]
+            mx = [max(p[i] for p in pos) for i in range(3)]
+            images.append({"uri": os.path.basename(png)})
+            textures.append({"source": len(images) - 1})
+            materials.append(material(pname, len(textures) - 1, amode))
+            gprims.append({"attributes": {"POSITION": b.acc(vp, 5126, len(pos), "VEC3", mn, mx),
+                                          "NORMAL":   b.acc(vn, 5126, len(nrm), "VEC3"),
+                                          "TEXCOORD_0": b.acc(vt, 5126, len(uv), "VEC2")},
+                           "indices": b.acc(vi, 5125, len(idx), "SCALAR"),
+                           "material": len(materials) - 1})
+            groups.append((pname, transform(pos, bone_world(bones)[bone_index_of(bones, bone)]),
+                           nrm, uv, idx, png))
+        meshes.append({"name": name, "primitives": gprims})
+        gear_nodes.append((name, bone, len(meshes) - 1))
 
     ibm = b.add(struct.pack('<%df' % (njoints*16), *[c for m in binds for c in m]))
     a_ibm = b.acc(ibm, 5126, njoints, "MAT4")
@@ -245,6 +291,9 @@ def build(parts, bones, binds, out_gltf, head=None):
     for i, bo in enumerate(bones):
         if bo["parent"] >= 0:
             nodes[bo["parent"]].setdefault("children", []).append(i)
+    for name, bone, mesh_id in gear_nodes:
+        nodes.append({"name": name, "mesh": mesh_id})
+        nodes[bone_index_of(bones, bone)].setdefault("children", []).append(len(nodes) - 1)
     roots = [i for i, bo in enumerate(bones) if bo["parent"] < 0]
     mesh_node = len(nodes)
     nodes.append({"name": base, "mesh": 0, "skin": 0})
@@ -294,47 +343,108 @@ def write_obj(groups, out_obj):
     o.close(); m.close()
     print(f"{out_obj}: {sum(len(g[1]) for g in groups)} vertices in {len(groups)} groups")
 
+
+# -- manifest-driven export --------------------------------------------------
+#  A5_EXPORT_UNIT writes a flat list of resource ids, because getting from a
+#  character's name to its meshes is five levels of database pointer:
+#
+#      name  <UserName>
+#      body  <geometry> <skeleton> <tex0..3>
+#      head  <head record> <texture>
+#      gear  <bone> <geometry> <skeleton> <tex0..3>
+#  CMaterial::EAlpha, in declaration order.
+ALPHA_MODES = ["OPAQUE", "MASK", "BLEND", "BLEND", "OPAQUE", "MASK", "BLEND", "OPAQUE", "BLEND"]
+
+def tex(token):
+    """A manifest texture is "<texture id>:<CMaterial::EAlpha>"."""
+    nID, _, nAlpha = token.partition(':')
+    mode = ALPHA_MODES[int(nAlpha)] if nAlpha and int(nAlpha) < len(ALPHA_MODES) else "OPAQUE"
+    return (int(nID), mode)
+
+def read_manifest(path):
+    m = {"name": os.path.splitext(os.path.basename(path))[0], "head": None, "gear": []}
+    for ln in open(path):
+        f = ln.split()
+        if not f or f[0].startswith('#'):
+            continue
+        if f[0] == 'name':   m["name"] = f[1]
+        elif f[0] == 'body': m["body"] = (int(f[1]), int(f[2]), [tex(x) for x in f[3:7]])
+        elif f[0] == 'head': m["head"] = (int(f[1]), tex(f[2]))
+        elif f[0] == 'gear': m["gear"].append((f[1], int(f[2]), int(f[3]), [tex(x) for x in f[4:8]]))
+    return m
+
+PART_NAMES = ['Body', 'Face', 'Legs', 'Extra']
+
+def export_unit(complete, manifest, out_gltf, binary='silentstorm_mac', tmp=None):
+    import subprocess, tempfile, shutil
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import mmp2png
+    tmp = tmp or tempfile.mkdtemp()
+    outdir = os.path.dirname(os.path.abspath(out_gltf))
+    base = os.path.splitext(os.path.basename(out_gltf))[0]
+
+    def run(**env):
+        subprocess.run([binary], env=dict(os.environ, **env), capture_output=True)
+
+    def texture(t, name):
+        """Decode one MMP texture next to the glTF, and return its file name."""
+        nID = t[0] if t else 0
+        if not nID:
+            return None
+        png = "%s_%s.png" % (base, name)
+        mmp2png.convert(os.path.join(complete, 'Textures', str(nID)), os.path.join(outdir, png))
+        return png
+
+    def geometry(nGeom, texIDs, prefix):
+        """Every part of one geometry that exists, with its material's texture."""
+        out = []
+        for p in range(4):
+            src = os.path.join(complete, 'Geometries', str(nGeom + (p << 16)))
+            if not os.path.exists(src):
+                continue
+            stem = os.path.join(tmp, '%s_%d' % (prefix, p))
+            run(A5_EXPORT_GEOM=src, A5_EXPORT_OUT=stem)
+            name = '%s%s' % (prefix, PART_NAMES[p] if prefix == 'Hanke' else '')
+            name = PART_NAMES[p] if prefix == 'body' else '%s%d' % (prefix, p)
+            t = texIDs[p] if p < len(texIDs) else (0, "OPAQUE")
+            out.append((name, stem + '.obj', stem + '.weights.txt', texture(t, name), t[1]))
+        return out
+
+    nGeom, nSkel, texIDs = manifest["body"]
+    parts = [g for g in geometry(nGeom, texIDs, 'body') if g[3]]
+
+    sk = os.path.join(tmp, 'skel.txt'); bd = os.path.join(tmp, 'binds.txt')
+    run(A5_EXPORT_SKELETON=os.path.join(complete, 'Skeletons', str(nSkel)), A5_EXPORT_OUT=sk)
+    run(A5_EXPORT_BINDS=os.path.join(complete, 'Binds', str(nGeom)), A5_EXPORT_OUT=bd)
+
+    head = None
+    if manifest["head"]:
+        nHead, nTex = manifest["head"]
+        hobj = os.path.join(tmp, 'head.obj')
+        run(A5_EXPORT_HEAD=os.path.join(complete, 'Heads', str(nHead)), A5_EXPORT_OUT=hobj)
+        if os.path.exists(hobj):
+            head = (hobj, texture(nTex, 'Head'), 'Head', nTex[1])
+
+    gear = []
+    for bone, nG, _nS, gtex in manifest["gear"]:
+        gparts = [(n, o, png, mode) for n, o, w, png, mode in geometry(nG, gtex, bone) if png]
+        if gparts:
+            gear.append((bone, bone, gparts))
+
+    bones = read_skeleton(sk)
+    groups = build(parts, bones, read_binds(bd), out_gltf, head=head, gear=gear)
+    return groups
+
 if __name__ == '__main__':
     import argparse
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description='build a rigged glTF character from the game data')
     ap.add_argument('--complete', required=True, help='the Complete/ directory')
-    ap.add_argument('--geom', type=int, required=True)
-    ap.add_argument('--skeleton', type=int, required=True)
-    ap.add_argument('--out', required=True)
-    ap.add_argument('--textures', nargs='*', default=[])
-    ap.add_argument('--head', type=int, help='CHead record id (Complete/Heads/<id>)')
-    ap.add_argument('--head-texture', default='')
-    ap.add_argument('--head-bone', default='Head')
+    ap.add_argument('--manifest', required=True,
+                    help='a unit manifest, from A5_EXPORT_UNIT=<UserName>')
+    ap.add_argument('--out', required=True, help='the .gltf to write')
     ap.add_argument('--obj', help='also write the merged mesh as Wavefront OBJ')
     a = ap.parse_args()
-    binary = os.environ.get('A5_BIN', 'silentstorm_mac')
-    import subprocess, tempfile
-    tmp = tempfile.mkdtemp()
-    names = ['Body', 'Face', 'Legs', 'Extra']
-    parts = []
-    for p in range(4):
-        src = os.path.join(a.complete, 'Geometries', str(a.geom + (p << 16)))
-        if not os.path.exists(src):
-            continue
-        base = os.path.join(tmp, 'p%d' % p)
-        subprocess.run([binary], env=dict(os.environ, A5_EXPORT_GEOM=src, A5_EXPORT_OUT=base),
-                       capture_output=True)
-        png = a.textures[p] if p < len(a.textures) else ''
-        parts.append((names[p], base + '.obj', base + '.weights.txt', png))
-    sk = os.path.join(tmp, 'skel.txt'); bd = os.path.join(tmp, 'binds.txt')
-    subprocess.run([binary], env=dict(os.environ,
-                   A5_EXPORT_SKELETON=os.path.join(a.complete, 'Skeletons', str(a.skeleton)),
-                   A5_EXPORT_OUT=sk), capture_output=True)
-    subprocess.run([binary], env=dict(os.environ,
-                   A5_EXPORT_BINDS=os.path.join(a.complete, 'Binds', str(a.geom)),
-                   A5_EXPORT_OUT=bd), capture_output=True)
-    head = None
-    if a.head:
-        hd = os.path.join(tmp, 'head.obj')
-        subprocess.run([binary], env=dict(os.environ,
-                       A5_EXPORT_HEAD=os.path.join(a.complete, 'Heads', str(a.head)),
-                       A5_EXPORT_OUT=hd), capture_output=True)
-        head = (hd, a.head_texture, a.head_bone)
-    groups = build(parts, read_skeleton(sk), read_binds(bd), a.out, head=head)
+    groups = export_unit(a.complete, read_manifest(a.manifest), a.out,
+                         binary=os.environ.get('A5_BIN', 'silentstorm_mac'))
     if a.obj:
         write_obj(groups, a.obj)

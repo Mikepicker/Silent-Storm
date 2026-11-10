@@ -51,6 +51,47 @@ def decode_dxt1(data, w, h):
                     px[i:i+4] = bytes((r, g, b, a))
     return px
 
+def decode_565(data, w, h):
+    px = bytearray(w * h * 4)
+    for i in range(min(w * h, len(data) // 2)):
+        r, g, b = rgb565(struct.unpack_from('<H', data, i * 2)[0])
+        px[i*4:i*4+4] = bytes((r, g, b, 255))
+    return px
+
+def decode_8888(data, w, h):
+    """D3DFMT_A8R8G8B8: little-endian, so the bytes run B, G, R, A."""
+    px = bytearray(w * h * 4)
+    for i in range(min(w * h, len(data) // 4)):
+        b, g, r, a = data[i*4:i*4+4]
+        px[i*4:i*4+4] = bytes((r, g, b, a))
+    return px
+
+def mip_chain(w, h, level_bytes):
+    """Total bytes of a full mip chain down to 1x1."""
+    total = 0
+    while True:
+        total += level_bytes(w, h)
+        if w == 1 and h == 1:
+            return total
+        w = max(1, w // 2); h = max(1, h // 2)
+
+CODECS = (
+    ('dxt1', lambda w, h: ((w + 3) // 4) * ((h + 3) // 4) * 8, decode_dxt1),
+    ('565',  lambda w, h: w * h * 2,                           decode_565),
+    ('8888', lambda w, h: w * h * 4,                           decode_8888),
+)
+
+def pick_codec(nBytes, w, h):
+    """The format code in the header does not select the compression -- 5, 6
+    and 7 all turn up on textures game.db calls dxt1 -- but the file length
+    does, because the three layouts differ by a factor of four."""
+    best = None
+    for name, level, decode in CODECS:
+        d = abs(mip_chain(w, h, level) - nBytes)
+        if best is None or d < best[0]:
+            best = (d, name, decode)
+    return best[1], best[2]
+
 def write_png(path, w, h, rgba):
     raw = b''.join(b'\x00' + bytes(rgba[y*w*4:(y+1)*w*4]) for y in range(h))
     def chunk(tag, data):
@@ -67,16 +108,14 @@ def convert(src, dst):
     if blob[:4] != b'MMP\0':
         raise SystemExit(f'{src}: not an MMP texture')
     _ver, avg, w, h, fmt = struct.unpack_from('<IIIII', blob, 4)
-    # The format code (5/6/7 seen) does not select the compression: game.db
-    # calls all of them dxt1.  Decode as DXT1 and let the average-colour check
-    # below confirm it.
-    rgba = decode_dxt1(blob[24:], w, h)
+    name, decode = pick_codec(len(blob) - 24, w, h)
+    rgba = decode(blob[24:], w, h)
     write_png(dst, w, h, rgba)
     n = w * h
     ar = sum(rgba[0::4]) // n; ag = sum(rgba[1::4]) // n; ab = sum(rgba[2::4]) // n
     er, eg, eb = (avg >> 16) & 255, (avg >> 8) & 255, avg & 255
     d = max(abs(ar-er), abs(ag-eg), abs(ab-eb))
-    print(f'  {dst}  {w}x{h}  avg decoded RGB({ar},{ag},{ab}) vs DB({er},{eg},{eb})  '
+    print(f'  {dst}  {w}x{h} {name}  avg decoded RGB({ar},{ag},{ab}) vs DB({er},{eg},{eb})  '
           f'{"OK" if d <= 16 else "MISMATCH %d" % d}')
 
 if __name__ == '__main__':
