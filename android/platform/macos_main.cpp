@@ -155,6 +155,7 @@ extern "C" int a5_export_geometry( const char *pszPath, const char *pszOutBase )
 extern "C" int a5_export_skeleton( const char *pszPath, const char *pszOut );
 extern "C" int a5_export_binds( const char *pszPath, const char *pszOut );
 extern "C" int a5_export_head( const char *pszPath, const char *pszOut );
+extern "C" int a5_export_anim( const char *pszPath, const char *pszOut );
 
 int main( int argc, char **argv )
 {
@@ -182,6 +183,11 @@ int main( int argc, char **argv )
     {
         const char *pszOut = getenv( "A5_EXPORT_OUT" );
         return a5_export_head( pszHead, pszOut ? pszOut : "/tmp/ss_head.obj" );
+    }
+    if ( const char *pszAnim = getenv( "A5_EXPORT_ANIM" ) )
+    {
+        const char *pszOut = getenv( "A5_EXPORT_OUT" );
+        return a5_export_anim( pszAnim, pszOut ? pszOut : "/tmp/ss_anims.txt" );
     }
     const char *pszDataRoot = argc > 1 ? argv[ 1 ] : "";
     for ( int i = 1; i < argc; ++i )

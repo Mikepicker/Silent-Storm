@@ -43,9 +43,12 @@
 #include "Main/GGeometry.h"
 #include "Main/GObjectInfo.h"   /* SLoadVertex      */
 #include "Main/GFileSkin.h"     /* SLoadVertexWeight */
-#include "Main/GAnimFormat.h"   /* SBone             */
+#include "Main/GAnimFormat.h"   /* SBone, SAnimationHeader */
 #include "head_neutral.h"      /* A5Head::Load      */
 #include <cstdio>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <algorithm>
 
 static void DumpUnitManifest( const char *pszWanted, const char *pszOut );
 
@@ -892,6 +895,110 @@ extern "C" int a5_export_binds( const char *pszPath, const char *pszOut )
     }
     fclose( pf );
     a5_log( A5_PRIORITY_INFO, "export: %s -> %s (%d matrices)", pszPath, pszOut, (int)inv.size() );
+    return 0;
+}
+
+/* ==========================================================================
+ *  Animation header dump.  CFileAnimation::Recalc reads chunk 1 as
+ *  SAnimationHeader, whose "indices" array says which SKELETON bone each
+ *  animated bone drives; CAnimation builds the reverse map and
+ *  CAnimator::GetBoneFrame leaves every bone the animation does not mention
+ *  at its skeleton rest pose.  So the quickest way to ask "are the fingers
+ *  animated at all" is to read the headers.  Give it a directory to walk the
+ *  lot in one process.                                                      */
+extern "C" int a5_export_anim( const char *pszPath, const char *pszOut )
+{
+    FILE *pf = fopen( pszOut, "w" );
+    if ( !pf )
+        return 1;
+    fprintf( pf, "# file nRoots nBones nAddBones length fps scale | skeleton bone indices\n" );
+    std::vector< std::string > files;
+    struct stat st;
+    if ( stat( pszPath, &st ) == 0 && S_ISDIR( st.st_mode ) )
+    {
+        if ( DIR *pDir = opendir( pszPath ) )
+        {
+            while ( struct dirent *pE = readdir( pDir ) )
+                if ( pE->d_name[ 0 ] != '.' )
+                    files.push_back( std::string( pszPath ) + "/" + pE->d_name );
+            closedir( pDir );
+        }
+    }
+    else
+        files.push_back( pszPath );
+    std::sort( files.begin(), files.end() );
+    int nRead = 0;
+    for ( size_t i = 0; i < files.size(); ++i )
+    {
+        NAnimation::SAnimationHeader hdr;
+        try
+        {
+            CFileStream in;
+            in.OpenRead( files[ i ].c_str() );
+            CStructureSaver saver( in, CStructureSaver::READ );
+            saver.Add( 1, &hdr );
+        }
+        catch ( ... )
+        {
+            continue;
+        }
+        ++nRead;
+        const char *pszName = strrchr( files[ i ].c_str(), '/' );
+        fprintf( pf, "%s %d %d %d %g %g %d |", pszName ? pszName + 1 : files[ i ].c_str(),
+                 hdr.nRoots, hdr.nBones, hdr.nAddBones, hdr.fLength, hdr.fFrameRate, (int)hdr.bScale );
+        for ( size_t k = 0; k < hdr.indices.size(); ++k )
+            fprintf( pf, " %d", hdr.indices[ k ] );
+        fprintf( pf, "\n" );
+        if ( files.size() > 1 )
+            continue;
+        /*  One file: also write the first key of every animated bone, as
+         *  "key <skeleton bone> <x> <y> <z> <w>", so it can be held against
+         *  the skeleton's rest rotation.  Layout per CAnimation::GetBoneFrame:
+         *  roots first, then rot-only bones, then add-bones -- unless bScale,
+         *  where roots and bones share one keysMSR array.                   */
+        std::vector< NAnimation::SRootAnimKey > keysRoots;
+        std::vector< NAnimation::SBoneAnimKey > keysBones;
+        std::vector< NAnimation::SAddBoneAnimKey > keysAddBones;
+        std::vector< NAnimation::SMSRAnimKey > keysMSR;
+        try
+        {
+            CFileStream in2;
+            in2.OpenRead( files[ i ].c_str() );
+            CStructureSaver s2( in2, CStructureSaver::READ );
+            s2.Add( 2, &keysRoots );
+            s2.Add( 3, &keysBones );
+            s2.Add( 4, &keysAddBones );
+            s2.Add( 5, &keysMSR );
+        }
+        catch ( ... ) {}
+        for ( size_t k = 0; k < hdr.indices.size(); ++k )
+        {
+            const int nAnim = (int)k;
+            const float *pQ = 0;
+            if ( hdr.bScale && nAnim < hdr.nRoots + hdr.nBones )
+            {
+                if ( nAnim < (int)keysMSR.size() ) pQ = reinterpret_cast< const float * >( &keysMSR[ nAnim ].rot );
+            }
+            else if ( nAnim < hdr.nRoots )
+            {
+                if ( nAnim < (int)keysRoots.size() ) pQ = reinterpret_cast< const float * >( &keysRoots[ nAnim ].rot );
+            }
+            else if ( nAnim < hdr.nRoots + hdr.nBones )
+            {
+                const int j = nAnim - hdr.nRoots;
+                if ( j < (int)keysBones.size() ) pQ = reinterpret_cast< const float * >( &keysBones[ j ].rot );
+            }
+            else
+            {
+                const int j = nAnim - hdr.nRoots - hdr.nBones;
+                if ( j < (int)keysAddBones.size() ) pQ = reinterpret_cast< const float * >( &keysAddBones[ j ].rot );
+            }
+            if ( pQ )
+                fprintf( pf, "key %d %.6f %.6f %.6f %.6f\n", hdr.indices[ k ], pQ[0], pQ[1], pQ[2], pQ[3] );
+        }
+    }
+    fclose( pf );
+    a5_log( A5_PRIORITY_INFO, "export: %d animation headers from %s -> %s", nRead, pszPath, pszOut );
     return 0;
 }
 
