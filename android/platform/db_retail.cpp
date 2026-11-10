@@ -39,6 +39,7 @@
 #include "Main/GGeometry.h"
 #include "Main/GObjectInfo.h"   /* SLoadVertex      */
 #include "Main/GFileSkin.h"     /* SLoadVertexWeight */
+#include "Main/GAnimFormat.h"   /* SBone             */
 #include <cstdio>
 
 #include <map>
@@ -661,6 +662,82 @@ int a5_loadout_pick( int nPersID, int nLevel, int nSeed, SA5LoadoutItem *pOut, i
             nAt = EmitChest( pB->nChestID, nMix, pOut, nMax, nAt );
     }
     return nAt;
+}
+
+/* ========================================================================== */
+/*  Skeleton and bind-pose export.  CFileSkeleton::Recalc reads the Skeletons
+ *  resource as chunk 1 = vector<SBone> (name, parent index, rest pos/rot/
+ *  scale) and chunk 2 = a scale flag; CFileBind::Recalc reads the Binds
+ *  resource, keyed by GEOMETRY id rather than skeleton id, as chunk 4 =
+ *  vector<SHMatrix>, the inverse bind matrices.  Together with the per-vertex
+ *  weights that is a complete rig.                                          */
+extern "C" int a5_export_skeleton( const char *pszPath, const char *pszOut )
+{
+    std::vector< NAnimation::SBone > bones;
+    bool bScale = false;
+    try
+    {
+        CFileStream in;
+        in.OpenRead( pszPath );
+        CStructureSaver saver( in, CStructureSaver::READ );
+        saver.Add( 1, &bones );
+        saver.Add( 2, &bScale );
+    }
+    catch ( ... )
+    {
+        a5_log( A5_PRIORITY_ERROR, "export: cannot read skeleton %s", pszPath );
+        return 1;
+    }
+    FILE *pf = fopen( pszOut, "w" );
+    if ( !pf )
+        return 1;
+    fprintf( pf, "# index parent name posX posY posZ quatX quatY quatZ quatW scaleX scaleY scaleZ\n" );
+    fprintf( pf, "# %d bones, scaled=%d\n", (int)bones.size(), (int)bScale );
+    for ( size_t i = 0; i < bones.size(); ++i )
+    {
+        const NAnimation::SBone &b = bones[i];
+        /*  CQuat keeps x/y/z/w in a private union; the layout is four floats. */
+        const float *pQ = reinterpret_cast< const float * >( &b.rot );
+        fprintf( pf, "%d %d %s %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+                 (int)i, b.nParent, b.szName.empty() ? "unnamed" : b.szName.c_str(),
+                 b.pos.x, b.pos.y, b.pos.z,
+                 pQ[0], pQ[1], pQ[2], pQ[3],
+                 b.scale.x, b.scale.y, b.scale.z );
+    }
+    fclose( pf );
+    a5_log( A5_PRIORITY_INFO, "export: %s -> %s (%d bones)", pszPath, pszOut, (int)bones.size() );
+    return 0;
+}
+
+extern "C" int a5_export_binds( const char *pszPath, const char *pszOut )
+{
+    std::vector< SHMatrix > inv;
+    try
+    {
+        CFileStream in;
+        in.OpenRead( pszPath );
+        CStructureSaver saver( in, CStructureSaver::READ );
+        saver.Add( 4, &inv );
+    }
+    catch ( ... )
+    {
+        a5_log( A5_PRIORITY_ERROR, "export: cannot read binds %s", pszPath );
+        return 1;
+    }
+    FILE *pf = fopen( pszOut, "w" );
+    if ( !pf )
+        return 1;
+    fprintf( pf, "# inverse bind matrices, 16 floats per bone, row major\n# %d bones\n", (int)inv.size() );
+    for ( size_t i = 0; i < inv.size(); ++i )
+    {
+        const float *m = &inv[i]._11;
+        for ( int k = 0; k < 16; ++k )
+            fprintf( pf, "%s%.6f", k ? " " : "", m[k] );
+        fprintf( pf, "\n" );
+    }
+    fclose( pf );
+    a5_log( A5_PRIORITY_INFO, "export: %s -> %s (%d matrices)", pszPath, pszOut, (int)inv.size() );
+    return 0;
 }
 
 /* ========================================================================== */

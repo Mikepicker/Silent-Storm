@@ -152,6 +152,8 @@ void PrintReport( const SBootReport &report )
 } // namespace
 
 extern "C" int a5_export_geometry( const char *pszPath, const char *pszOutBase );
+extern "C" int a5_export_skeleton( const char *pszPath, const char *pszOut );
+extern "C" int a5_export_binds( const char *pszPath, const char *pszOut );
 
 int main( int argc, char **argv )
 {
@@ -164,6 +166,16 @@ int main( int argc, char **argv )
     {
         const char *pszOut = getenv( "A5_EXPORT_OUT" );
         return a5_export_geometry( pszGeom, pszOut ? pszOut : "/tmp/ss_model" );
+    }
+    if ( const char *pszSkel = getenv( "A5_EXPORT_SKELETON" ) )
+    {
+        const char *pszOut = getenv( "A5_EXPORT_OUT" );
+        return a5_export_skeleton( pszSkel, pszOut ? pszOut : "/tmp/ss_skeleton.txt" );
+    }
+    if ( const char *pszBind = getenv( "A5_EXPORT_BINDS" ) )
+    {
+        const char *pszOut = getenv( "A5_EXPORT_OUT" );
+        return a5_export_binds( pszBind, pszOut ? pszOut : "/tmp/ss_binds.txt" );
     }
     const char *pszDataRoot = argc > 1 ? argv[ 1 ] : "";
     for ( int i = 1; i < argc; ++i )
