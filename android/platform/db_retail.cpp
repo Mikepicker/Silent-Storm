@@ -912,6 +912,7 @@ extern "C" int a5_export_anim( const char *pszPath, const char *pszOut )
     if ( !pf )
         return 1;
     fprintf( pf, "# file nRoots nBones nAddBones length fps scale | skeleton bone indices\n" );
+    fprintf( pf, "# k <frame> <bone> <parent: -1 root, -2 rotation only, -3 scaled, >=0 re-parented> <pos> <quat xyzw>\n" );
     std::vector< std::string > files;
     struct stat st;
     if ( stat( pszPath, &st ) == 0 && S_ISDIR( st.st_mode ) )
@@ -951,11 +952,13 @@ extern "C" int a5_export_anim( const char *pszPath, const char *pszOut )
         fprintf( pf, "\n" );
         if ( files.size() > 1 )
             continue;
-        /*  One file: also write the first key of every animated bone, as
-         *  "key <skeleton bone> <x> <y> <z> <w>", so it can be held against
-         *  the skeleton's rest rotation.  Layout per CAnimation::GetBoneFrame:
-         *  roots first, then rot-only bones, then add-bones -- unless bScale,
-         *  where roots and bones share one keysMSR array.                   */
+        /*  One file: also write every key of every animated bone, as
+         *  "k <frame> <skeleton bone> <parent> <px py pz> <qx qy qz qw>".
+         *  Layout per CAnimation::GetBoneFrame: roots first, then the
+         *  rotation-only bones, then the add-bones -- unless bScale, where
+         *  roots and bones share one keysMSR array.  Rotation-only bones keep
+         *  the skeleton's rest position, and only add-bones carry a parent,
+         *  which is how the engine moves a weapon from the hand to the hip. */
         std::vector< NAnimation::SRootAnimKey > keysRoots;
         std::vector< NAnimation::SBoneAnimKey > keysBones;
         std::vector< NAnimation::SAddBoneAnimKey > keysAddBones;
@@ -971,30 +974,73 @@ extern "C" int a5_export_anim( const char *pszPath, const char *pszOut )
             s2.Add( 5, &keysMSR );
         }
         catch ( ... ) {}
-        for ( size_t k = 0; k < hdr.indices.size(); ++k )
+        int nLength = (int)hdr.fLength;
+        if ( hdr.fLength - nLength != 0 )
+            ++nLength;
+        for ( int nFrame = 0; nFrame <= nLength; ++nFrame )
         {
-            const int nAnim = (int)k;
-            const float *pQ = 0;
-            if ( hdr.bScale && nAnim < hdr.nRoots + hdr.nBones )
+            for ( size_t k = 0; k < hdr.indices.size(); ++k )
             {
-                if ( nAnim < (int)keysMSR.size() ) pQ = reinterpret_cast< const float * >( &keysMSR[ nAnim ].rot );
+                const int nAnim = (int)k;
+                int j = nAnim, nGroup = 0;
+                int nWhich = 0;          /* 0 roots, 1 bones, 2 add, 3 MSR */
+                if ( nAnim >= hdr.nRoots + hdr.nBones )
+                {
+                    j = nAnim - hdr.nRoots - hdr.nBones;
+                    nGroup = hdr.nAddBones;
+                    nWhich = 2;
+                }
+                else if ( hdr.bScale )
+                {
+                    nGroup = hdr.nRoots + hdr.nBones;
+                    nWhich = 3;
+                }
+                else if ( nAnim < hdr.nRoots )
+                {
+                    nGroup = hdr.nRoots;
+                    nWhich = 0;
+                }
+                else
+                {
+                    j = nAnim - hdr.nRoots;
+                    nGroup = hdr.nBones;
+                    nWhich = 1;
+                }
+                const int nAt = nFrame * nGroup + j;
+                const float *pQ = 0;
+                const CVec3 *pP = 0;
+                /*  -1 a root (no parent, carries a position), -2 a
+                 *  rotation-only bone (keeps the skeleton's offset and
+                 *  parent), -3 a scaled root/bone (carries a position, keeps
+                 *  its parent), >= 0 an add-bone the animation re-parents.  */
+                int nParent = -2;
+                if ( nWhich == 3 && nAt < (int)keysMSR.size() )
+                {
+                    pQ = reinterpret_cast< const float * >( &keysMSR[ nAt ].rot );
+                    pP = &keysMSR[ nAt ].pos;
+                    nParent = -3;
+                }
+                else if ( nWhich == 0 && nAt < (int)keysRoots.size() )
+                {
+                    pQ = reinterpret_cast< const float * >( &keysRoots[ nAt ].rot );
+                    pP = &keysRoots[ nAt ].pos;
+                    nParent = -1;
+                }
+                else if ( nWhich == 1 && nAt < (int)keysBones.size() )
+                    pQ = reinterpret_cast< const float * >( &keysBones[ nAt ].rot );
+                else if ( nWhich == 2 && nAt < (int)keysAddBones.size() )
+                {
+                    pQ = reinterpret_cast< const float * >( &keysAddBones[ nAt ].rot );
+                    pP = &keysAddBones[ nAt ].pos;
+                    nParent = keysAddBones[ nAt ].nParent;
+                }
+                if ( !pQ )
+                    continue;
+                fprintf( pf, "k %d %d %d %.6f %.6f %.6f %.6f %.6f %.6f %.6f\n",
+                         nFrame, hdr.indices[ k ], nParent,
+                         pP ? pP->x : 0.f, pP ? pP->y : 0.f, pP ? pP->z : 0.f,
+                         pQ[0], pQ[1], pQ[2], pQ[3] );
             }
-            else if ( nAnim < hdr.nRoots )
-            {
-                if ( nAnim < (int)keysRoots.size() ) pQ = reinterpret_cast< const float * >( &keysRoots[ nAnim ].rot );
-            }
-            else if ( nAnim < hdr.nRoots + hdr.nBones )
-            {
-                const int j = nAnim - hdr.nRoots;
-                if ( j < (int)keysBones.size() ) pQ = reinterpret_cast< const float * >( &keysBones[ j ].rot );
-            }
-            else
-            {
-                const int j = nAnim - hdr.nRoots - hdr.nBones;
-                if ( j < (int)keysAddBones.size() ) pQ = reinterpret_cast< const float * >( &keysAddBones[ j ].rot );
-            }
-            if ( pQ )
-                fprintf( pf, "key %d %.6f %.6f %.6f %.6f\n", hdr.indices[ k ], pQ[0], pQ[1], pQ[2], pQ[3] );
         }
     }
     fclose( pf );
