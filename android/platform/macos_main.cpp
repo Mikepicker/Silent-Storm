@@ -151,8 +151,20 @@ void PrintReport( const SBootReport &report )
 
 } // namespace
 
+extern "C" int a5_export_geometry( const char *pszPath, const char *pszOutBase );
+
 int main( int argc, char **argv )
 {
+    /*  A5_EXPORT_GEOM=<geometry file> dumps that mesh as Wavefront OBJ and
+     *  exits without starting the game.  The file is one of the numbered
+     *  entries in the Geometries resource (the source release ships them
+     *  unpacked under Complete/Geometries/).  A5_EXPORT_OUT sets the output
+     *  base path; bone weights are written beside it as a text table.  */
+    if ( const char *pszGeom = getenv( "A5_EXPORT_GEOM" ) )
+    {
+        const char *pszOut = getenv( "A5_EXPORT_OUT" );
+        return a5_export_geometry( pszGeom, pszOut ? pszOut : "/tmp/ss_model" );
+    }
     const char *pszDataRoot = argc > 1 ? argv[ 1 ] : "";
     for ( int i = 1; i < argc; ++i )
         if ( strcmp( argv[ i ], "--fullscreen" ) == 0 )

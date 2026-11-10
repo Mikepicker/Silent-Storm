@@ -36,6 +36,10 @@
 #include "DBFormat/DataMap.h"
 #include "a5_log.h"
 #include "a5_loadout.h"
+#include "Main/GGeometry.h"
+#include "Main/GObjectInfo.h"   /* SLoadVertex      */
+#include "Main/GFileSkin.h"     /* SLoadVertexWeight */
+#include <cstdio>
 
 #include <map>
 
@@ -657,6 +661,96 @@ int a5_loadout_pick( int nPersID, int nLevel, int nSeed, SA5LoadoutItem *pOut, i
             nAt = EmitChest( pB->nChestID, nMix, pOut, nMax, nAt );
     }
     return nAt;
+}
+
+/* ========================================================================== */
+/*  Geometry export.  A character's mesh is not in game.db -- the database only
+ *  holds its bounds -- it is a file in the Geometries resource, keyed by the
+ *  CGeometry record id.  CObjectInfoLoader::RecalcValue reads it as four
+ *  chunks, and this is the same read, written back out as Wavefront OBJ:
+ *
+ *      1 : vector<SLoadVertex>        pos, normal, uv, tangent basis, colour
+ *      2 : vector<WORD> indices       polygon corner indices
+ *      3 : vector<WORD> polys         one-past-the-end offset per polygon
+ *      5 : vector<SLoadVertexWeight>  { weight, vertex, bone } skinning triples
+ *
+ *  Polygons are emitted as-is rather than triangulated, so the original
+ *  topology survives into Blender.  Weights are written beside the OBJ as a
+ *  plain text table, since OBJ cannot carry them.                            */
+extern "C" int a5_export_geometry( const char *pszPath, const char *pszOutBase )
+{
+    std::vector< NGScene::SLoadVertex > verts;
+    std::vector< WORD > indices, polys;
+    std::vector< NGScene::SLoadVertexWeight > wghts;
+    try
+    {
+        CFileStream in;
+        in.OpenRead( pszPath );
+        CStructureSaver saver( in, CStructureSaver::READ );
+        saver.Add( 1, &verts );
+        saver.Add( 2, &indices );
+        saver.Add( 3, &polys );
+        saver.Add( 5, &wghts );
+    }
+    catch ( ... )
+    {
+        a5_log( A5_PRIORITY_ERROR, "export: cannot read geometry %s", pszPath );
+        return 1;
+    }
+    if ( verts.empty() || polys.size() < 2 )
+    {
+        a5_log( A5_PRIORITY_ERROR, "export: %s has %d verts / %d polys -- nothing to write",
+                pszPath, (int)verts.size(), (int)polys.size() );
+        return 1;
+    }
+
+    std::string szObj = std::string( pszOutBase ) + ".obj";
+    FILE *pf = fopen( szObj.c_str(), "w" );
+    if ( !pf )
+        return 1;
+    fprintf( pf, "# Silent Storm geometry %s\n# %d vertices, %d polygons\n",
+             pszPath, (int)verts.size(), (int)polys.size() - 1 );
+    for ( size_t i = 0; i < verts.size(); ++i )
+        fprintf( pf, "v %.6f %.6f %.6f\n", verts[i].pos.x, verts[i].pos.y, verts[i].pos.z );
+    for ( size_t i = 0; i < verts.size(); ++i )
+        fprintf( pf, "vn %.6f %.6f %.6f\n", verts[i].normal.x, verts[i].normal.y, verts[i].normal.z );
+    for ( size_t i = 0; i < verts.size(); ++i )
+        fprintf( pf, "vt %.6f %.6f\n", verts[i].tex.x, 1.0f - verts[i].tex.y );
+    fprintf( pf, "o geometry\n" );
+    int nFaces = 0;
+    for ( size_t k = 1; k < polys.size(); ++k )
+    {
+        if ( polys[k] <= polys[k-1] || polys[k] > indices.size() )
+            continue;
+        fprintf( pf, "f" );
+        for ( int i = polys[k-1]; i < polys[k]; ++i )
+        {
+            const int v = indices[i] + 1;      /* OBJ is 1-based */
+            fprintf( pf, " %d/%d/%d", v, v, v );
+        }
+        fprintf( pf, "\n" );
+        ++nFaces;
+    }
+    fclose( pf );
+
+    int nBones = 0;
+    if ( !wghts.empty() )
+    {
+        std::string szW = std::string( pszOutBase ) + ".weights.txt";
+        if ( FILE *pw = fopen( szW.c_str(), "w" ) )
+        {
+            fprintf( pw, "# vertex bone weight   (%d entries)\n", (int)wghts.size() );
+            for ( size_t i = 0; i < wghts.size(); ++i )
+            {
+                fprintf( pw, "%d %d %.6f\n", wghts[i].nVertex, wghts[i].nBone, wghts[i].fWeight );
+                if ( wghts[i].nBone + 1 > nBones ) nBones = wghts[i].nBone + 1;
+            }
+            fclose( pw );
+        }
+    }
+    a5_log( A5_PRIORITY_INFO, "export: %s -> %s  (%d verts, %d faces, %d weights over %d bones)",
+            pszPath, szObj.c_str(), (int)verts.size(), nFaces, (int)wghts.size(), nBones );
+    return 0;
 }
 
 void NDatabase::Serialize( CDataStream &file, CStructureSaver::EMode mode )
