@@ -115,8 +115,13 @@ def convert(src, dst):
     ar = sum(rgba[0::4]) // n; ag = sum(rgba[1::4]) // n; ab = sum(rgba[2::4]) // n
     er, eg, eb = (avg >> 16) & 255, (avg >> 8) & 255, avg & 255
     d = max(abs(ar-er), abs(ag-eg), abs(ab-eb))
+    #  A texture this unpack does not actually ship is a file of repeating
+    #  filler that decodes to nothing; the database's average colour is 0 too,
+    #  so the check below would pass it.  Say so instead.
+    blank = not any(rgba)
     print(f'  {dst}  {w}x{h} {name}  avg decoded RGB({ar},{ag},{ab}) vs DB({er},{eg},{eb})  '
-          f'{"OK" if d <= 16 else "MISMATCH %d" % d}')
+          f'{"BLANK - this texture is filler, not image data" if blank else "OK" if d <= 16 else "MISMATCH %d" % d}')
+    return not blank
 
 if __name__ == '__main__':
     if len(sys.argv) != 3:

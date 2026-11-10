@@ -435,6 +435,113 @@ def export_unit(complete, manifest, out_gltf, binary='silentstorm_mac', tmp=None
     groups = build(parts, bones, read_binds(bd), out_gltf, head=head, gear=gear)
     return groups
 
+
+# -- static props ------------------------------------------------------------
+#  A scenery object has no skin: ObjectTemplates names a CPlacableObject, whose
+#  CTRndObject picks a CObject, which holds one CContainerModel per destroy
+#  stage -- stage 0 intact, the rest wrecked -- and only then comes the CModel
+#  with its geometry and materials.  A5_EXPORT_PROP resolves that and writes
+#
+#      prop <name> <stage> <geometry> <skeleton> <texture:alpha> x4
+#
+def read_props(path):
+    out = []
+    for ln in open(path):
+        f = ln.split()
+        if not f or f[0] != 'prop':
+            continue
+        out.append(dict(name=f[1], stage=int(f[2]), geom=int(f[3]), skel=int(f[4]),
+                        tex=[tex(x) for x in f[5:9]]))
+    return out
+
+def build_static(props, out_gltf, gap=0.6):
+    """One glTF holding several props, laid out in a row on the floor."""
+    base = os.path.splitext(os.path.basename(out_gltf))[0]
+    bin_name = base + ".bin"
+    b = Buf()
+    meshes, materials, images, textures, nodes, groups = [], [], [], [], [], []
+    at = 0.0
+    for name, parts in props:
+        prims = []
+        lo = [1e9]*3; hi = [-1e9]*3
+        for pname, obj, png, amode in parts:
+            pos, nrm, uv, idx = read_obj(obj)
+            if not nrm:
+                nrm = face_normals(pos, idx)
+            vp = b.add(struct.pack('<%df' % (len(pos)*3), *[c for p in pos for c in p]), 34962)
+            vn = b.add(struct.pack('<%df' % (len(nrm)*3), *[c for p in nrm for c in p]), 34962)
+            vt = b.add(struct.pack('<%df' % (len(uv)*2),  *[c for p in uv  for c in p]), 34962)
+            vi = b.add(struct.pack('<%dI' % len(idx), *idx), 34963)
+            mn = [min(p[i] for p in pos) for i in range(3)]
+            mx = [max(p[i] for p in pos) for i in range(3)]
+            lo = [min(lo[i], mn[i]) for i in range(3)]
+            hi = [max(hi[i], mx[i]) for i in range(3)]
+            images.append({"uri": os.path.basename(png)})
+            textures.append({"source": len(images) - 1})
+            materials.append(material(pname, len(textures) - 1, amode))
+            prims.append({"attributes": {"POSITION": b.acc(vp, 5126, len(pos), "VEC3", mn, mx),
+                                         "NORMAL":   b.acc(vn, 5126, len(nrm), "VEC3"),
+                                         "TEXCOORD_0": b.acc(vt, 5126, len(uv), "VEC2")},
+                          "indices": b.acc(vi, 5125, len(idx), "SCALAR"),
+                          "material": len(materials) - 1})
+            groups.append((pname, pos, nrm, uv, idx, png))
+        if not prims:
+            continue
+        meshes.append({"name": name, "primitives": prims})
+        #  Props come out of the game standing on z = 0 around their own origin.
+        width = hi[0] - lo[0]
+        nodes.append({"name": name, "mesh": len(meshes) - 1,
+                      "translation": [at - (lo[0] + hi[0]) / 2, 0.0, 0.0]})
+        at += width + gap
+
+    conv = len(nodes)
+    s = math.sin(math.radians(-90) / 2); c = math.cos(math.radians(-90) / 2)
+    nodes.append({"name": "ZUpToYUp", "rotation": [s, 0.0, 0.0, c],
+                  "children": list(range(len(nodes)))})
+    g = {"asset": {"version": "2.0", "generator": "silent-storm gltf_export.py"},
+         "scene": 0, "scenes": [{"nodes": [conv]}], "nodes": nodes,
+         "meshes": meshes, "materials": materials, "textures": textures, "images": images,
+         "samplers": [{"magFilter": 9729, "minFilter": 9987, "wrapS": 10497, "wrapT": 10497}],
+         "buffers": [{"uri": bin_name, "byteLength": len(b.data)}],
+         "bufferViews": b.views, "accessors": b.accs}
+    for t in g["textures"]:
+        t["sampler"] = 0
+    json.dump(g, open(out_gltf, "w"), indent=1)
+    open(os.path.join(os.path.dirname(out_gltf) or ".", bin_name), "wb").write(bytes(b.data))
+    tris = sum(a["count"] for a in b.accs if a["type"] == "SCALAR") // 3
+    print(f"{out_gltf}: {len(meshes)} props, {tris} triangles, {len(b.data)} bytes of buffer")
+    return groups
+
+def export_props(complete, manifest, out_gltf, stage=0, binary='silentstorm_mac', tmp=None):
+    import subprocess, tempfile, sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import mmp2png
+    tmp = tmp or tempfile.mkdtemp()
+    outdir = os.path.dirname(os.path.abspath(out_gltf))
+    base = os.path.splitext(os.path.basename(out_gltf))[0]
+    props = []
+    for rec in manifest:
+        if rec["stage"] != stage:
+            continue
+        parts = []
+        for p in range(4):
+            src = os.path.join(complete, 'Geometries', str(rec["geom"] + (p << 16)))
+            if not os.path.exists(src):
+                continue
+            t = rec["tex"][p] if p < len(rec["tex"]) else (0, "OPAQUE")
+            if not t[0]:
+                continue
+            stem = os.path.join(tmp, '%s_%d' % (rec["name"], p))
+            subprocess.run([binary], env=dict(os.environ, A5_EXPORT_GEOM=src, A5_EXPORT_OUT=stem),
+                           capture_output=True)
+            png = "%s_%s%d.png" % (base, rec["name"], p)
+            mmp2png.convert(os.path.join(complete, 'Textures', str(t[0])),
+                            os.path.join(outdir, png))
+            parts.append(("%s%d" % (rec["name"], p), stem + '.obj', png, t[1]))
+        if parts:
+            props.append((rec["name"], parts))
+    return build_static(props, out_gltf)
+
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser(description='build a rigged glTF character from the game data')
@@ -443,8 +550,16 @@ if __name__ == '__main__':
                     help='a unit manifest, from A5_EXPORT_UNIT=<UserName>')
     ap.add_argument('--out', required=True, help='the .gltf to write')
     ap.add_argument('--obj', help='also write the merged mesh as Wavefront OBJ')
+    ap.add_argument('--props', action='store_true',
+                    help='the manifest is a prop list from A5_EXPORT_PROP')
+    ap.add_argument('--stage', type=int, default=0,
+                    help='destroy stage to export (0 = intact)')
     a = ap.parse_args()
-    groups = export_unit(a.complete, read_manifest(a.manifest), a.out,
-                         binary=os.environ.get('A5_BIN', 'silentstorm_mac'))
+    binary = os.environ.get('A5_BIN', 'silentstorm_mac')
+    if a.props:
+        groups = export_props(a.complete, read_props(a.manifest), a.out,
+                              stage=a.stage, binary=binary)
+    else:
+        groups = export_unit(a.complete, read_manifest(a.manifest), a.out, binary=binary)
     if a.obj:
         write_obj(groups, a.obj)

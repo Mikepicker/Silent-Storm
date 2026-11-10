@@ -35,6 +35,7 @@
 #include "FileIO/BasicChunk1.h"
 #include "DBFormat/DataMap.h"
 #include "DBFormat/DataFormat.h"
+#include "DBFormat/DataObject.h"
 #include "DBFormat/DataGeometry.h"
 #include "DBFormat/DataAnimation.h"
 #include "DBFormat/DataRPG.h"
@@ -51,6 +52,7 @@
 #include <algorithm>
 
 static void DumpUnitManifest( const char *pszWanted, const char *pszOut );
+static void DumpPropManifest( const char *pszWanted, const char *pszOut );
 
 #include <map>
 
@@ -385,6 +387,8 @@ void NDatabase::Import()
     }
     a5_log( A5_PRIORITY_INFO, "game.db: retail format, %d/%d tables matched DBFormat (%d records imported, %d tables in the file unknown to this source, %d missing-column warnings)",
             nTablesMatched, (int)descrs.size(), nRecords, nUnknown, nMissingColumnWarnings );
+    if ( const char *pszProp = getenv( "A5_EXPORT_PROP" ) )
+        DumpPropManifest( pszProp, getenv( "A5_EXPORT_OUT" ) );
     if ( const char *pszUnit = getenv( "A5_EXPORT_UNIT" ) )
     {
         /*  A comma separated list writes one file per name, <out>.<name>.txt,
@@ -453,6 +457,75 @@ static void EmitModel( FILE *pf, const char *pszKind, const char *pszBone, NDb::
     for ( int i = 0; i < NDb::N_MODEL_MATERIALS; ++i )
         fprintf( pf, " %s", TextureOf( pModel->pMaterials[ i ].GetPtr() ).c_str() );
     fprintf( pf, "\n" );
+}
+
+/*  Props.  A scenery object is reached through one more template than a
+ *  character: ObjectTemplates names a CPlacableObject, whose CTRndObject
+ *  picks a CObject, which holds one CContainerModel per destroy stage, and
+ *  only then comes the CModel with its geometry and materials.  Stage 0 is
+ *  the intact object; the rest are the wrecked versions.                    */
+static void DumpPropManifest( const char *pszWanted, const char *pszOut )
+{
+    std::map< std::string, int > byName;
+    hash_map< int, CObj< CObjectBase > >::iterator itT = NDatabase::retailTables.find( 0x29 );  /* ObjectTemplates */
+    CRetailTable *pT = itT != NDatabase::retailTables.end() ? dynamic_cast< CRetailTable * >( itT->second.GetPtr() ) : 0;
+    if ( pT )
+    {
+        SCursor cur;
+        cur.Open( pT );
+        for ( cur.MoveFirst(); !cur.IsEof(); cur.MoveNext() )
+            byName[ SCursor::Narrow( cur.GetString( "UserName" ) ) ] = cur.GetInt( "PlacableID" );
+    }
+    CDBTable< NDb::CPlacableObject > *pTable = NDatabase::GetTable< NDb::CPlacableObject >();
+    if ( !pTable )
+    {
+        a5_log( A5_PRIORITY_ERROR, "export: no PlacableObjects table" );
+        return;
+    }
+    FILE *pf = fopen( pszOut ? pszOut : "/tmp/ss_props.txt", "w" );
+    if ( !pf )
+        return;
+    fprintf( pf, "# prop <name> <stage> <geometry> <skeleton> <texture:alpha> x4\n" );
+    std::string szList = pszWanted;
+    size_t nAt = 0;
+    while ( nAt <= szList.size() )
+    {
+        size_t nEnd = szList.find( ',', nAt );
+        if ( nEnd == std::string::npos ) nEnd = szList.size();
+        std::string szOne = szList.substr( nAt, nEnd - nAt );
+        nAt = nEnd + 1;
+        if ( szOne.empty() )
+            continue;
+        std::map< std::string, int >::const_iterator it = byName.find( szOne );
+        const int nID = it != byName.end() ? it->second : atoi( szOne.c_str() );
+        NDb::CPlacableObject *pPO = pTable->GetRecord( nID );
+        if ( !pPO || !IsValid( pPO->pObject ) )
+        {
+            a5_log( A5_PRIORITY_WARN, "export: prop '%s' (placable %d) has no object", szOne.c_str(), nID );
+            continue;
+        }
+        SRand rnd;
+        NDb::CObject *pObj = pPO->pObject->CreateObject( &rnd );
+        if ( !pObj )
+            continue;
+        for ( int nStage = 0; nStage < NDb::N_DESTROY_STAGES; ++nStage )
+        {
+            NDb::CContainerModel *pCM = pObj->pModels[ nStage ].GetPtr();
+            if ( !pCM || !IsValid( pCM->pModel ) )
+                continue;
+            NDb::CModel *pModel = pCM->pModel;
+            if ( !IsValid( pModel->pGeometry ) )
+                continue;
+            fprintf( pf, "prop %s %d %d %d", szOne.c_str(), nStage,
+                     pModel->pGeometry->GetRecordID(),
+                     IsValid( pModel->pSkeleton ) ? pModel->pSkeleton->GetRecordID() : 0 );
+            for ( int i = 0; i < NDb::N_MODEL_MATERIALS; ++i )
+                fprintf( pf, " %s", TextureOf( pModel->pMaterials[ i ].GetPtr() ).c_str() );
+            fprintf( pf, "\n" );
+        }
+        a5_log( A5_PRIORITY_INFO, "export: prop '%s' -> placable %d", szOne.c_str(), nID );
+    }
+    fclose( pf );
 }
 
 static void DumpUnitManifest( const char *pszWanted, const char *pszOut )
