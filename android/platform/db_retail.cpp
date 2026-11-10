@@ -40,6 +40,7 @@
 #include "Main/GObjectInfo.h"   /* SLoadVertex      */
 #include "Main/GFileSkin.h"     /* SLoadVertexWeight */
 #include "Main/GAnimFormat.h"   /* SBone             */
+#include "head_neutral.h"      /* A5Head::Load      */
 #include <cstdio>
 
 #include <map>
@@ -737,6 +738,100 @@ extern "C" int a5_export_binds( const char *pszPath, const char *pszOut )
     }
     fclose( pf );
     a5_log( A5_PRIORITY_INFO, "export: %s -> %s (%d matrices)", pszPath, pszOut, (int)inv.size() );
+    return 0;
+}
+
+/* ========================================================================== */
+/*  Head export.  A character's skull is not part of the body mesh: the body
+ *  stops at the collar and CSetRender::AddMesh hangs a separate head off bone
+ *  12 ("CRAP - head bone") through CAddBoneFilter.  That head is LifeStudio
+ *  Head middleware -- CHeadMeshLoader::Recalc reads the Heads resource as
+ *
+ *      1 : vector<CMemoryStream>      LifeStudio animator streams
+ *      2 : vector<int>                vertex count per stream
+ *      3 : vector<CTPoint<int> >      copy pairs: mesh[y] = mesh[x]
+ *      4 : vector<CVec2>              UVs
+ *      5 : vector<WORD>               polygon corner indices
+ *      6 : vector<int>                one-past-the-end offset per polygon
+ *
+ *  -- and only the positions live inside the opaque animator stream, which
+ *  IAnimator::Process writes out after the facial muscles have been applied.
+ *  compat/src/lifestudio_stub.cpp decodes the neutral pose of that stream, so
+ *  the same call that gives the port its static heads gives us the mesh here.
+ *  Everything else -- topology, UVs, the seam duplication table -- is ordinary
+ *  engine data.                                                             */
+extern "C" int a5_export_head( const char *pszPath, const char *pszOut )
+{
+    std::vector< CMemoryStream > streams;
+    std::vector< int > nVertices;
+    std::vector< CTPoint< int > > copys;
+    std::vector< CVec2 > UVs;
+    std::vector< WORD > indices;
+    std::vector< int > tris;
+    try
+    {
+        CFileStream in;
+        in.OpenRead( pszPath );
+        CStructureSaver saver( in, CStructureSaver::READ );
+        saver.Add( 1, &streams );
+        saver.Add( 2, &nVertices );
+        saver.Add( 3, &copys );
+        saver.Add( 4, &UVs );
+        saver.Add( 5, &indices );
+        saver.Add( 6, &tris );
+    }
+    catch ( ... )
+    {
+        a5_log( A5_PRIORITY_ERROR, "export: cannot read head %s", pszPath );
+        return 1;
+    }
+
+    std::vector< A5Head::Point > mesh;
+    for ( size_t i = 0; i < streams.size(); ++i )
+    {
+        std::vector< A5Head::Point > part;
+        if ( !A5Head::Load( streams[i].GetBuffer(), streams[i].GetSize(), part ) )
+        {
+            a5_log( A5_PRIORITY_ERROR, "export: head stream %d does not decode", (int)i );
+            return 1;
+        }
+        if ( i < nVertices.size() && (int)part.size() != nVertices[i] )
+            a5_log( A5_PRIORITY_WARN, "export: head stream %d has %d vertices, resource says %d",
+                    (int)i, (int)part.size(), nVertices[i] );
+        mesh.insert( mesh.end(), part.begin(), part.end() );
+    }
+    /*  The seam vertices carry a second UV and share a position. */
+    mesh.resize( UVs.size() );
+    for ( size_t i = 0; i < copys.size(); ++i )
+        if ( copys[i].x >= 0 && copys[i].y >= 0 &&
+             copys[i].x < (int)mesh.size() && copys[i].y < (int)mesh.size() )
+            mesh[ copys[i].y ] = mesh[ copys[i].x ];
+
+    FILE *pf = fopen( pszOut, "w" );
+    if ( !pf )
+        return 1;
+    fprintf( pf, "# LifeStudio head %s, neutral pose\n", pszPath );
+    fprintf( pf, "# %d vertices, %d polygons, %d streams, %d seam copies\n",
+             (int)mesh.size(), (int)tris.size(), (int)streams.size(), (int)copys.size() );
+    for ( size_t i = 0; i < mesh.size(); ++i )
+        fprintf( pf, "v %.6f %.6f %.6f\n", mesh[i].x, mesh[i].y, mesh[i].z );
+    for ( size_t i = 0; i < UVs.size(); ++i )
+        fprintf( pf, "vt %.6f %.6f\n", UVs[i].x, 1.0f - UVs[i].y );
+    int nFrom = 0;
+    for ( size_t i = 0; i < tris.size(); ++i )
+    {
+        const int nTo = tris[i];
+        if ( nTo <= nFrom || nTo > (int)indices.size() )
+            break;
+        fprintf( pf, "f" );
+        for ( int k = nFrom; k < nTo; ++k )
+            fprintf( pf, " %d/%d", indices[k] + 1, indices[k] + 1 );
+        fprintf( pf, "\n" );
+        nFrom = nTo;
+    }
+    fclose( pf );
+    a5_log( A5_PRIORITY_INFO, "export: %s -> %s (%d verts, %d polys)",
+            pszPath, pszOut, (int)mesh.size(), (int)tris.size() );
     return 0;
 }
 

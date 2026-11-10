@@ -49,7 +49,9 @@ def read_obj(path):
     for ln in open(path):
         if ln.startswith('v '):   pos.append([float(x) for x in ln.split()[1:4]])
         elif ln.startswith('vn '): nrm.append([float(x) for x in ln.split()[1:4]])
-        elif ln.startswith('vt '): uv.append([float(x) for x in ln.split()[1:3]])
+        elif ln.startswith('vt '):
+            u, v = (float(x) for x in ln.split()[1:3])
+            uv.append([u, 1.0 - v])   # OBJ vt counts up from the bottom, glTF TEXCOORD_0 down from the top
         elif ln.startswith('f '):
             c = [int(p.split('/')[0]) - 1 for p in ln.split()[1:]]
             for k in range(1, len(c) - 1):          # fan-triangulate n-gons
@@ -89,14 +91,87 @@ class Buf:
         if mx: a["max"] = mx
         self.accs.append(a); return len(self.accs) - 1
 
-def build(parts, bones, binds, out_gltf):
+
+# -- bone-space maths, for meshes the engine hangs off a bone ----------------
+def bone_world(bones):
+    """Rest world matrix of every bone, as row-major 4x4 lists (engine Z-up)."""
+    def mul(A, B):
+        return [[sum(A[r][k]*B[k][c] for k in range(4)) for c in range(4)] for r in range(4)]
+    def local(bo):
+        x, y, z, w = bo["rot"]
+        M = [[1-2*(y*y+z*z), 2*(x*y-z*w),   2*(x*z+y*w),   bo["pos"][0]],
+             [2*(x*y+z*w),   1-2*(x*x+z*z), 2*(y*z-x*w),   bo["pos"][1]],
+             [2*(x*z-y*w),   2*(y*z+x*w),   1-2*(x*x+y*y), bo["pos"][2]],
+             [0.0, 0.0, 0.0, 1.0]]
+        for r in range(3):
+            for c in range(3):
+                M[r][c] *= bo["scale"][c]
+        return M
+    out = [None] * len(bones)
+    def w(i):
+        if out[i] is None:
+            m = local(bones[i])
+            out[i] = mul(w(bones[i]["parent"]), m) if bones[i]["parent"] >= 0 else m
+        return out[i]
+    for i in range(len(bones)):
+        w(i)
+    return out
+
+def read_head_obj(path):
+    """The head dump has positions, UVs and polygons but no normals."""
+    pos, uv, polys = [], [], []
+    for ln in open(path):
+        if ln.startswith('v '):    pos.append([float(x) for x in ln.split()[1:4]])
+        elif ln.startswith('vt '):
+            u, v = (float(x) for x in ln.split()[1:3])
+            uv.append([u, 1.0 - v])   # OBJ vt counts up from the bottom, glTF TEXCOORD_0 down from the top
+        elif ln.startswith('f '):  polys.append([int(p.split('/')[0]) - 1 for p in ln.split()[1:]])
+    idx = []
+    for c in polys:
+        for k in range(1, len(c) - 1):
+            idx += [c[0], c[k], c[k+1]]
+    return pos, uv, idx
+
+def face_normals(pos, idx):
+    nrm = [[0.0, 0.0, 0.0] for _ in pos]
+    for t in range(0, len(idx), 3):
+        a, bb, c = (pos[idx[t]], pos[idx[t+1]], pos[idx[t+2]])
+        u = [bb[i] - a[i] for i in range(3)]
+        v = [c[i] - a[i] for i in range(3)]
+        n = [u[1]*v[2]-u[2]*v[1], u[2]*v[0]-u[0]*v[2], u[0]*v[1]-u[1]*v[0]]
+        for k in range(3):
+            for i in range(3):
+                nrm[idx[t+k]][i] += n[i]
+    for n in nrm:
+        L = math.sqrt(sum(c*c for c in n)) or 1.0
+        n[0] /= L; n[1] /= L; n[2] /= L
+    return nrm
+
+#  CGameView::CreateLSHead puts the LifeStudio head into head-bone space with
+#  move (0,-0.035,0), scale 0.014 and rotate (0,-pi/2,0); MakeMatrix reads that
+#  middle angle as a rotation about Z, and CMSRConvert pushes the scale inside,
+#  so the point order is scale, rotate, move -- then the bone.
+HEAD_SCALE  = 0.014
+HEAD_ROT_Z  = -math.pi / 2
+HEAD_MOVE   = (0.0, -0.035, 0.0)
+
+def head_to_bone_space(pos, W):
+    c, s = math.cos(HEAD_ROT_Z), math.sin(HEAD_ROT_Z)
+    out = []
+    for p in pos:
+        x, y, z = (p[0]*HEAD_SCALE, p[1]*HEAD_SCALE, p[2]*HEAD_SCALE)
+        v = (c*x - s*y + HEAD_MOVE[0], s*x + c*y + HEAD_MOVE[1], z + HEAD_MOVE[2])
+        out.append([W[r][0]*v[0] + W[r][1]*v[1] + W[r][2]*v[2] + W[r][3] for r in range(3)])
+    return out
+
+def build(parts, bones, binds, out_gltf, head=None):
     base = os.path.splitext(os.path.basename(out_gltf))[0]
     bin_name = base + ".bin"
     b = Buf()
     njoints = len(binds)
     meshes, materials, images, textures = [], [], [], []
 
-    prims = []
+    prims, groups = [], []
     for name, obj, wts, png in parts:
         pos, nrm, uv, idx = read_obj(obj)
         J, W = read_weights(wts, len(pos), njoints)
@@ -122,6 +197,39 @@ def build(parts, bones, binds, out_gltf):
         prims.append({"attributes": {"POSITION": a_pos, "NORMAL": a_nrm,
                                      "TEXCOORD_0": a_uv, "JOINTS_0": a_j, "WEIGHTS_0": a_w},
                       "indices": a_i, "material": len(materials) - 1})
+        groups.append((name, pos, nrm, uv, idx, png))
+    if head:
+        head_obj, head_png, head_bone = head
+        bone_index = next(i for i, bo in enumerate(bones) if bo["name"] == head_bone)
+        if bone_index >= njoints:
+            raise SystemExit("head bone %r is not a skinned joint" % head_bone)
+        hpos, huv, hidx = read_head_obj(head_obj)
+        hpos = head_to_bone_space(hpos, bone_world(bones)[bone_index])
+        hnrm = face_normals(hpos, hidx)
+        J = [[bone_index, 0, 0, 0]] * len(hpos)
+        W = [[1.0, 0.0, 0.0, 0.0]] * len(hpos)
+        vp = b.add(struct.pack('<%df' % (len(hpos)*3), *[c for p in hpos for c in p]), 34962)
+        vn = b.add(struct.pack('<%df' % (len(hnrm)*3), *[c for p in hnrm for c in p]), 34962)
+        vt = b.add(struct.pack('<%df' % (len(huv)*2),  *[c for p in huv  for c in p]), 34962)
+        vj = b.add(struct.pack('<%dH' % (len(J)*4),    *[c for p in J    for c in p]), 34962)
+        vw = b.add(struct.pack('<%df' % (len(W)*4),    *[c for p in W    for c in p]), 34962)
+        vi = b.add(struct.pack('<%dI' % len(hidx), *hidx), 34963)
+        mn = [min(p[i] for p in hpos) for i in range(3)]
+        mx = [max(p[i] for p in hpos) for i in range(3)]
+        images.append({"uri": os.path.basename(head_png)})
+        textures.append({"source": len(images) - 1})
+        materials.append({"name": "Head", "pbrMetallicRoughness": {
+            "baseColorTexture": {"index": len(textures) - 1},
+            "metallicFactor": 0.0, "roughnessFactor": 0.9}})
+        prims.append({"attributes": {
+                          "POSITION":   b.acc(vp, 5126, len(hpos), "VEC3", mn, mx),
+                          "NORMAL":     b.acc(vn, 5126, len(hnrm), "VEC3"),
+                          "TEXCOORD_0": b.acc(vt, 5126, len(huv),  "VEC2"),
+                          "JOINTS_0":   b.acc(vj, 5123, len(J),    "VEC4"),
+                          "WEIGHTS_0":  b.acc(vw, 5126, len(W),    "VEC4")},
+                      "indices": b.acc(vi, 5125, len(hidx), "SCALAR"),
+                      "material": len(materials) - 1})
+        groups.append(("Head", hpos, hnrm, huv, hidx, head_png))
     meshes.append({"name": base, "primitives": prims})
 
     ibm = b.add(struct.pack('<%df' % (njoints*16), *[c for m in binds for c in m]))
@@ -160,6 +268,31 @@ def build(parts, bones, binds, out_gltf):
     tris = sum(a["count"] for a in b.accs if a["type"] == "SCALAR") // 3
     print(f"{out_gltf}: {len(prims)} primitives, {tris} triangles, "
           f"{len(bones)} bones ({njoints} skinned), {len(b.data)} bytes of buffer")
+    return groups
+
+def write_obj(groups, out_obj):
+    """The same pieces as one Wavefront OBJ, one group per material."""
+    base = os.path.splitext(os.path.basename(out_obj))[0]
+    mtl = base + ".mtl"
+    o = open(out_obj, "w")
+    m = open(os.path.join(os.path.dirname(out_obj) or ".", mtl), "w")
+    o.write("# Silent Storm character, %d parts\nmtllib %s\n" % (len(groups), mtl))
+    v0 = 1
+    for name, pos, nrm, uv, idx, png in groups:
+        m.write("newmtl %s\nKd 1 1 1\nmap_Kd %s\n\n" % (name, os.path.basename(png)))
+        o.write("g %s\nusemtl %s\n" % (name, name))
+        for p in pos: o.write("v %.6f %.6f %.6f\n" % tuple(p))
+        for t in uv:  o.write("vt %.6f %.6f\n" % (t[0], 1.0 - t[1]))
+        for n in nrm: o.write("vn %.6f %.6f %.6f\n" % tuple(n))
+        for t in range(0, len(idx), 3):
+            c = [idx[t] + v0, idx[t+1] + v0, idx[t+2] + v0]
+            if nrm:
+                o.write("f %d/%d/%d %d/%d/%d %d/%d/%d\n" % (c[0],c[0],c[0], c[1],c[1],c[1], c[2],c[2],c[2]))
+            else:
+                o.write("f %d/%d %d/%d %d/%d\n" % (c[0],c[0], c[1],c[1], c[2],c[2]))
+        v0 += len(pos)
+    o.close(); m.close()
+    print(f"{out_obj}: {sum(len(g[1]) for g in groups)} vertices in {len(groups)} groups")
 
 if __name__ == '__main__':
     import argparse
@@ -169,6 +302,10 @@ if __name__ == '__main__':
     ap.add_argument('--skeleton', type=int, required=True)
     ap.add_argument('--out', required=True)
     ap.add_argument('--textures', nargs='*', default=[])
+    ap.add_argument('--head', type=int, help='CHead record id (Complete/Heads/<id>)')
+    ap.add_argument('--head-texture', default='')
+    ap.add_argument('--head-bone', default='Head')
+    ap.add_argument('--obj', help='also write the merged mesh as Wavefront OBJ')
     a = ap.parse_args()
     binary = os.environ.get('A5_BIN', 'silentstorm_mac')
     import subprocess, tempfile
@@ -191,4 +328,13 @@ if __name__ == '__main__':
     subprocess.run([binary], env=dict(os.environ,
                    A5_EXPORT_BINDS=os.path.join(a.complete, 'Binds', str(a.geom)),
                    A5_EXPORT_OUT=bd), capture_output=True)
-    build(parts, read_skeleton(sk), read_binds(bd), a.out)
+    head = None
+    if a.head:
+        hd = os.path.join(tmp, 'head.obj')
+        subprocess.run([binary], env=dict(os.environ,
+                       A5_EXPORT_HEAD=os.path.join(a.complete, 'Heads', str(a.head)),
+                       A5_EXPORT_OUT=hd), capture_output=True)
+        head = (hd, a.head_texture, a.head_bone)
+    groups = build(parts, read_skeleton(sk), read_binds(bd), a.out, head=head)
+    if a.obj:
+        write_obj(groups, a.obj)

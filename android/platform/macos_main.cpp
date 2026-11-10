@@ -154,6 +154,7 @@ void PrintReport( const SBootReport &report )
 extern "C" int a5_export_geometry( const char *pszPath, const char *pszOutBase );
 extern "C" int a5_export_skeleton( const char *pszPath, const char *pszOut );
 extern "C" int a5_export_binds( const char *pszPath, const char *pszOut );
+extern "C" int a5_export_head( const char *pszPath, const char *pszOut );
 
 int main( int argc, char **argv )
 {
@@ -176,6 +177,11 @@ int main( int argc, char **argv )
     {
         const char *pszOut = getenv( "A5_EXPORT_OUT" );
         return a5_export_binds( pszBind, pszOut ? pszOut : "/tmp/ss_binds.txt" );
+    }
+    if ( const char *pszHead = getenv( "A5_EXPORT_HEAD" ) )
+    {
+        const char *pszOut = getenv( "A5_EXPORT_OUT" );
+        return a5_export_head( pszHead, pszOut ? pszOut : "/tmp/ss_head.obj" );
     }
     const char *pszDataRoot = argc > 1 ? argv[ 1 ] : "";
     for ( int i = 1; i < argc; ++i )
